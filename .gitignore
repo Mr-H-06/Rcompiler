@@ -1,7 +1,7 @@
-test_case/
-test_case/*.txt
-test_case/*.ll
-test_case/*.json
+test_case/**
+!test_case/**/*.rx
+!test_case/**/*.in
+!test_case/**/*.out
 
 # 测试分类工具
 split_tests
