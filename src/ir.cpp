@@ -2283,3 +2283,5 @@ bool generate_ir(BlockStmtAST *program, SemanticAnalyzer &analyzer, const std::s
   emitBuiltinCToStderr();
   return true;
 }
+
+//llvm语法相关由copilot辅助生成
