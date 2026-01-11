@@ -160,11 +160,43 @@ public:
 
   const std::vector<SemanticIssue> &errors() const { return issues; }
 
-  public:
   // 生命周期管理
-  void reset();
+  void reset() {
+    symbols = SymbolTable();
+    symbols.enterScope();
+    issues.clear();
+    structs.clear();
+    enums.clear();
+    functions.clear();
+    methods.clear();
+    currentReturn.reset();
+    currentImplType.clear();
+    loopDepth = 0;
+    constIntValues.clear();
+    exprTypes.clear();
+    registerBuiltins();
+  }
 
-  void registerBuiltins();
+  void registerBuiltins() {
+    // Seed builtin functions into the global scope so user code can call them without declarations.
+    const auto voidType = TypeFactory::getVoid();
+    auto registerBuiltin = [&](const std::string &name,
+                               const std::vector<TypeRef> &params,
+                               const TypeRef &retType) {
+      auto returnType = retType ? retType : voidType;
+      FunctionInfo info;
+      info.name = name;
+      info.params = params;
+      info.returnType = returnType;
+      functions[name] = info;
+      Symbol symbol{name, SymbolKind::Function, TypeFactory::makeFunction(params, returnType), false};
+      symbols.addSymbol(symbol);
+    };
+
+    registerBuiltin("printInt", {TypeFactory::getInt()}, voidType);
+    registerBuiltin("printlnInt", {TypeFactory::getInt()}, voidType);
+    registerBuiltin("getInt", {}, TypeFactory::getInt());
+  }
 
   void collectTypeDeclarations(BlockStmtAST *program);
 

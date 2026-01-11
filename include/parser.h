@@ -265,11 +265,7 @@ public:
 
   unique_ptr<ExprAST> parse_logical();
 
-  unique_ptr<ExprAST> parse_bitwise_or();
-
-  unique_ptr<ExprAST> parse_bitwise_xor();
-
-  unique_ptr<ExprAST> parse_bitwise_and();
+  unique_ptr<ExprAST> parse_bitwise();
 
   unique_ptr<ExprAST> parse_equality();
 

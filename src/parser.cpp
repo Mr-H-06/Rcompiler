@@ -64,19 +64,14 @@ static std::unique_ptr<BlockExprAST> try_convert_block_to_expr(BlockStmtAST* blo
     // 如果是表达式语句，使用表达式的值
     last_expr = std::move(expr_stmt->expr);
   } else if (auto if_expr_stmt = dynamic_cast<IfExprAST*>(last_stmt.get())) {
-    // 如果是if表达式语句，直接使用if表达式
     last_expr = std::unique_ptr<IfExprAST>(if_expr_stmt);
   } else if (auto if_stmt = dynamic_cast<IfStmtAST*>(last_stmt.get())) {
-    // 如果是if语句，尝试转换为if表达式
     last_expr = try_convert_if_to_expr(if_stmt);
   } else if (auto loop_expr_stmt = dynamic_cast<LoopExprAST*>(last_stmt.get())) {
-    // 如果是loop表达式语句，直接使用loop表达式
     last_expr = std::unique_ptr<LoopExprAST>(loop_expr_stmt);
   } else if (auto loop_stmt = dynamic_cast<LoopStmtAST*>(last_stmt.get())) {
-    // 如果是loop语句，尝试转换为loop表达式
     last_expr = try_convert_loop_to_expr(loop_stmt);
   } else {
-    // 其他类型语句，无法作为表达式返回
     return nullptr;
   }
   
@@ -87,11 +82,9 @@ static std::unique_ptr<BlockExprAST> try_convert_block_to_expr(BlockStmtAST* blo
   // 创建一个新的语句列表，不包含最后一个语句
   std::vector<std::unique_ptr<StmtAST>> statements;
   for (size_t i = 0; i < block->statements.size() - 1; ++i) {
-    // 现在我们可以直接移动语句，因为block不再是const的
     statements.push_back(std::move(block->statements[i]));
   }
   
-  // 创建BlockExprAST节点
   return std::make_unique<BlockExprAST>(std::move(statements), std::move(last_expr), block->position());
 }
 
@@ -132,7 +125,6 @@ static bool contains_break_without_value(StmtAST* stmt) {
     return contains_break_without_value(loop_stmt->body.get());
   }
   
-  // 其他类型的语句不包含break语句
   return false;
 }
 
@@ -164,8 +156,9 @@ static std::unique_ptr<IfExprAST> try_convert_if_to_expr(IfStmtAST* if_stmt) {
   std::unique_ptr<ExprAST> then_expr;
   if (auto then_block = dynamic_cast<BlockStmtAST*>(if_stmt->then_branch.get())) {
     then_expr = try_convert_block_to_expr(then_block);
+  } else if (auto then_if = dynamic_cast<IfStmtAST*>(if_stmt->then_branch.get())) {
+    then_expr = try_convert_if_to_expr(then_if);
   } else {
-    // 非代码块分支，无法转换为表达式
     return nullptr;
   }
   
@@ -176,14 +169,12 @@ static std::unique_ptr<IfExprAST> try_convert_if_to_expr(IfStmtAST* if_stmt) {
   // 检查else分支是否有返回值
   std::unique_ptr<ExprAST> else_expr;
   if (!if_stmt->else_branch) {
-    // 没有else分支，无法转换为表达式
     return nullptr;
   } else if (auto else_block = dynamic_cast<BlockStmtAST*>(if_stmt->else_branch.get())) {
     else_expr = try_convert_block_to_expr(else_block);
   } else if (auto else_if = dynamic_cast<IfStmtAST*>(if_stmt->else_branch.get())) {
     else_expr = try_convert_if_to_expr(else_if);
   } else {
-    // 非代码块或if语句分支，无法转换为表达式
     return nullptr;
   }
   
@@ -200,6 +191,7 @@ static std::unique_ptr<IfExprAST> try_convert_if_to_expr(IfStmtAST* if_stmt) {
   );
 }
 
+//入口
 std::unique_ptr<BlockStmtAST> Parser::parse_program() {
   std::vector<std::unique_ptr<StmtAST> > stmts;
   while (!match(TokenKind::Eof)) {
@@ -226,33 +218,9 @@ std::unique_ptr<ExprAST> Parser::parse_logical() {
   return lhs;
 }
 
-std::unique_ptr<ExprAST> Parser::parse_bitwise_or() {
-  auto lhs = parse_bitwise_xor();
-  while (match(TokenKind::Operator, "|")) {
-    std::string op = current().text();
-    size_t pos_ = current().position();
-    advance();
-    auto rhs = parse_bitwise_xor();
-    lhs = std::make_unique<BinaryExprAST>(op, pos_, std::move(lhs), std::move(rhs));
-  }
-  return lhs;
-}
-
-std::unique_ptr<ExprAST> Parser::parse_bitwise_xor() {
-  auto lhs = parse_bitwise_and();
-  while (match(TokenKind::Operator, "^")) {
-    std::string op = current().text();
-    size_t pos_ = current().position();
-    advance();
-    auto rhs = parse_bitwise_and();
-    lhs = std::make_unique<BinaryExprAST>(op, pos_, std::move(lhs), std::move(rhs));
-  }
-  return lhs;
-}
-
-std::unique_ptr<ExprAST> Parser::parse_bitwise_and() {
+std::unique_ptr<ExprAST> Parser::parse_bitwise() {
   auto lhs = parse_comparison();
-  while (match(TokenKind::Operator, "&")) {
+  while (match(TokenKind::Operator, "&") || match(TokenKind::Operator, "^") || match(TokenKind::Operator, "|")) {
     std::string op = current().text();
     size_t pos_ = current().position();
     advance();
@@ -263,12 +231,12 @@ std::unique_ptr<ExprAST> Parser::parse_bitwise_and() {
 }
 
 std::unique_ptr<ExprAST> Parser::parse_equality() {
-  auto lhs = parse_bitwise_or();
+  auto lhs = parse_bitwise();
   while (match(TokenKind::Comparison, "==") || match(TokenKind::Comparison, "!=")) {
     std::string op = current().text();
     size_t pos_ = current().position();
     advance();
-    auto rhs = parse_bitwise_or();
+    auto rhs = parse_bitwise();
     lhs = std::make_unique<BinaryExprAST>(op, pos_, std::move(lhs), std::move(rhs));
   }
   return lhs;
@@ -469,7 +437,7 @@ std::unique_ptr<ExprAST> Parser::parse_factor() {
     
     // 特殊处理&mut表达式
     if (op == "&" && match(TokenKind::Keyword, "mut")) {
-      advance(); // 跳过mut关键字
+      advance(); 
       auto operand = parse_factor();
       return std::make_unique<UnaryExprAST>("&mut", pos_, std::move(operand));
     }
@@ -493,7 +461,6 @@ std::unique_ptr<ExprAST> Parser::parse_factor() {
       if (method_name == "to_string" && match(TokenKind::Punctuation, "(")) {
         advance();
         expect(TokenKind::Punctuation, ")");
-        // 直接返回一个字符串表达式，表示3.to_string()的结果
         return std::make_unique<StringExprAST>(std::to_string(val), pos_, false);
       }
       
@@ -1014,19 +981,15 @@ std::unique_ptr<StmtAST> Parser::parse_stmt() {
       advance();
       // 解析break语句，可以带一个可选的返回值表达式
       std::unique_ptr<ExprAST> break_value = nullptr;
-      // 如果下一个token不是分号，则解析返回值表达式
       if (current().kind() != TokenKind::Punctuation || current().text() != ";") {
         break_value = parse_expr();
-        // 检查下一个token是否是右大括号，如果是，说明可能是代码块的最后一个语句
         if (current().kind() == TokenKind::Punctuation && current().text() == "}") {
-          // 如果是代码块的最后一个语句，可以允许不加分号
           if (break_value) {
             return std::make_unique<BreakStmtAST>(tok.position(), std::move(break_value));
           } else {
             return std::make_unique<BreakStmtAST>(tok.position());
           }
         } else {
-          // 否则，必须要有分号
           expect(TokenKind::Punctuation, ";");
         }
       } else {
@@ -1120,15 +1083,13 @@ std::unique_ptr<StmtAST> Parser::parse_stmt() {
       expect(TokenKind::Punctuation, "(");
       auto params = parse_fn_params();
       auto ret_type = parse_fn_return_type();
-      // 可解析返回类型、泛型等
-      // 解析函数体
+      // 可解析返回类型、泛型等，解析函数体
       auto body = parse_block();
       // 返回函数节点
       return std::make_unique<FnStmtAST>(fn_name, std::move(params), std::move(ret_type), std::move(body), false, tok.position());
     } else if (tok.text() == "for") {
       advance();
-      // 解析for循环
-      // 这里简化处理，实际可能需要更复杂的解析逻辑
+      // 解析for循环，这里简化处理
       std::cerr << "Keyword not fully implemented: for at position " << current().position();
       throw std::runtime_error("Keyword not fully implemented: for");
     } else if (tok.text() == "if") {

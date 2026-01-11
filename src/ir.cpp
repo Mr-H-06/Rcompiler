@@ -1,59 +1,15 @@
-#include "ir.h"
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <stdexcept>
-#include <unordered_map>
-#include <unordered_set>
-#include <optional>
-#include <sstream>
-#include <algorithm>
-#include <functional>
+﻿#include "ir.h"
+namespace IRGen {
+  SemanticAnalyzer *g_analyzer = nullptr;
+  bool g_needsMemset = false;
+  bool g_needsMemcpy = false;
+  bool g_needsMalloc = false;
 
-namespace {
-  namespace fs = std::filesystem;
+  // 全局变量定义
+  std::unordered_map<std::string, size_t> g_declArity;
+  std::unordered_set<std::string> g_definedFuncs;
 
-  struct Value {
-    std::string name;
-    std::string type; // "i64", "i1", or "ptr"
-    bool arrayAlloca = false; // true if the pointer comes from alloca [N x i64]
-    size_t slots = 1; // total slots when arrayAlloca is true or aggregate pointer
-    bool isLValuePtr = false; // true when the ptr represents an lvalue address (from & or reference)
-  };
-
-  struct TypeLayout {
-    size_t slots = 1; // number of i64 slots occupied
-    bool aggregate = false; // true for structs/arrays
-    bool arrayLike = false; // true for arrays (including array fields)
-  };
-
-  struct FunctionCtx {
-    std::string name;
-    bool returnsVoid = false;
-    bool aggregateReturn = false;
-    TypeLayout retLayout;
-    std::string retPtr;
-    int tempId = 0;
-    int labelId = 0;
-    std::ostringstream body;
-    std::vector<std::string> entryAllocas;
-    std::string currentLabel;
-
-    struct VarInfo {
-      TypeRef type;
-      TypeLayout layout;
-      std::string ptr;
-      bool arrayAlloca = false;
-      bool isRefBinding = false; // true when the variable stores a reference (raw pointer)
-      bool refIsRawSlot = false; // true if the reference pointer itself is stored in the alloca slot
-    };
-
-    std::unordered_map<std::string, VarInfo> vars;
-    std::string breakLabel;
-    std::string continueLabel;
-    bool terminated = false;
-  };
-
+  // 函数实现
   fs::path deriveLlPath(const std::string &inputPath) {
     fs::path in(inputPath);
     if (in.has_extension()) {
@@ -72,12 +28,6 @@ namespace {
     return prefix + std::to_string(++fn.labelId);
   }
 
-  Value toI64(FunctionCtx &fn, const Value &v);
-
-  void copySlots(FunctionCtx &fn, const Value &src, const Value &dst, size_t count);
-
-  TypeRef stripRef(const TypeRef &t);
-
   Value ensureBool(FunctionCtx &fn, const Value &v) {
     if (v.type == "i1") return v;
     Value asInt = v;
@@ -87,6 +37,43 @@ namespace {
     std::string tmp = freshTemp(fn);
     fn.body << "  " << tmp << " = icmp ne i64 " << asInt.name << ", 0\n";
     return {tmp, "i1"};
+  }
+
+  bool isRefType(const TypeRef &t) {
+    return t && t->kind == BaseType::Reference;
+  }
+
+  // 检查类型是否需要按引用传递
+  bool needsByValue(const TypeRef &t) {
+    auto layout = layoutOf(t);
+    return !layout.aggregate && layout.slots == 1;
+  }
+
+  // 检查类型是否需要按引用传递
+  bool needsByRef(const TypeRef &t) {
+    return !needsByValue(t);
+  }
+
+  TypeRef exprType(ExprAST *expr) {
+    if (!g_analyzer || !expr) return nullptr;
+    return g_analyzer->getCachedExprType(expr);
+  }
+
+  std::optional<int64_t> constInt(ExprAST *e) {
+    if (auto *n = dynamic_cast<NumberExprAST *>(e)) return n->value;
+    return std::nullopt;
+  }
+
+  Value fallbackValue() {
+    return {"0", "i64"};
+  }
+
+  Value emitNumber(int64_t v) {
+    return {std::to_string(v), "i64"};
+  }
+
+  Value emitBool(bool v) {
+    return {v ? "1" : "0", "i1"};
   }
 
   Value toI64(FunctionCtx &fn, const Value &v) {
@@ -104,8 +91,7 @@ namespace {
     TypeRef base = stripRef(ty);
     bool isUnsigned = base && base->kind == BaseType::Int && base->isUnsigned;
     int bitWidth = (base && base->kind == BaseType::Int && base->bitWidth > 0)
-                     ? base->bitWidth
-                     : 32;
+                     ? base->bitWidth : 32;
     if (base && base->kind == BaseType::Char) {
       bitWidth = 8;
       isUnsigned = true;
@@ -118,7 +104,7 @@ namespace {
     fn.body << "  " << truncated << " = trunc i64 " << as64.name << " to i" << bitWidth << "\n";
     std::string widened = freshTemp(fn);
     fn.body << "  " << widened << " = " << (isUnsigned ? "zext" : "sext") << " i" << bitWidth << " "
-            << truncated << " to i64\n";
+        << truncated << " to i64\n";
     return {widened, "i64"};
   }
 
@@ -206,8 +192,6 @@ namespace {
     return static_cast<size_t>(len) * elemSlots;
   }
 
-  extern SemanticAnalyzer *g_analyzer;
-
   size_t slotsFromTypeAST(TypeAST *t) {
     if (!t) return 0;
     if (auto *arr = dynamic_cast<ArrayTypeAST *>(t)) {
@@ -229,11 +213,6 @@ namespace {
     return 0;
   }
 
-  SemanticAnalyzer *g_analyzer = nullptr;
-  bool g_needsMemset = false;
-  bool g_needsMemcpy = false;
-  bool g_needsMalloc = false;
-
   constexpr size_t kHeapSlotsThreshold = 65536; // allocate large aggregates on heap to avoid stack overflow
 
   TypeRef stripRef(const TypeRef &t) {
@@ -244,11 +223,6 @@ namespace {
   std::unordered_map<std::string, std::vector<std::tuple<std::string, size_t, size_t, TypeRef> > > g_structLayouts;
   std::unordered_map<std::string, std::vector<size_t> > g_paramMaxSlots;
 
-  TypeLayout layoutOf(const TypeRef &t);
-
-  bool isRefType(const TypeRef &t) {
-    return t && t->kind == BaseType::Reference;
-  }
 
   const std::vector<std::tuple<std::string, size_t, size_t, TypeRef> > &getStructLayout(const std::string &name) {
     auto it = g_structLayouts.find(name);
@@ -349,17 +323,6 @@ namespace {
       default:
         return "i64";
     }
-  }
-
-  // 检查类型是否需要按引用传递
-  bool needsByValue(const TypeRef &t) {
-    auto layout = layoutOf(t);
-    return !layout.aggregate && layout.slots == 1;
-  }
-
-  // 检查类型是否需要按引用传递
-  bool needsByRef(const TypeRef &t) {
-    return !needsByValue(t);
   }
 
   // 生成类型转换代码
@@ -485,7 +448,7 @@ namespace {
     }
     g_needsMemcpy = true;
     fn.body << "  call void @llvm.memcpy.p0.p0.i64(ptr " << dstPtr.name << ", ptr " << srcPtr.name << ", i64 "
-            << (count * 8) << ", i1 false)\n";
+        << (count * 8) << ", i1 false)\n";
   }
 
   std::string gepSlot(FunctionCtx &fn, const Value &base, size_t idx) {
@@ -497,35 +460,6 @@ namespace {
       fn.body << "  " << tmp << " = getelementptr i64, ptr " << base.name << ", i64 " << idx << "\n";
     }
     return tmp;
-  }
-
-  Value emitExpr(FunctionCtx &fn, ExprAST *expr);
-
-  void emitStmt(FunctionCtx &fn, StmtAST *stmt);
-
-  std::unordered_map<std::string, size_t> g_declArity;
-  std::unordered_set<std::string> g_definedFuncs;
-
-  TypeRef exprType(ExprAST *expr) {
-    if (!g_analyzer || !expr) return nullptr;
-    return g_analyzer->getCachedExprType(expr);
-  }
-
-  std::optional<int64_t> constInt(ExprAST *e) {
-    if (auto *n = dynamic_cast<NumberExprAST *>(e)) return n->value;
-    return std::nullopt;
-  }
-
-  Value fallbackValue() {
-    return {"0", "i64"};
-  }
-
-  Value emitNumber(int64_t v) {
-    return {std::to_string(v), "i64"};
-  }
-
-  Value emitBool(bool v) {
-    return {v ? "1" : "0", "i1"};
   }
 
   FunctionCtx::VarInfo makeAlloca(FunctionCtx &fn, const std::string &name, const TypeLayout &layout) {
@@ -700,7 +634,10 @@ namespace {
         return out;
       }
       if (exprLayout.aggregate || exprLayout.slots > 1) {
-        Value out{info.ptr, "ptr", info.arrayAlloca || exprLayout.aggregate || exprLayout.slots > 1, std::max<size_t>(info.layout.slots, exprLayout.slots)};
+        Value out{
+          info.ptr, "ptr", info.arrayAlloca || exprLayout.aggregate || exprLayout.slots > 1,
+          std::max<size_t>(info.layout.slots, exprLayout.slots)
+        };
         out.isLValuePtr = true;
         return out;
       }
@@ -930,7 +867,8 @@ namespace {
             size_t copySlotsCount = std::max<size_t>(pLayout.slots, argSlots);
             auto forwardIfReadonly = [&](Value &v) -> bool {
               if (!paramMutable && v.type == "ptr") {
-                v.arrayAlloca = v.arrayAlloca || pLayout.aggregate || pLayout.arrayLike || argLayout.aggregate || argLayout.arrayLike;
+                v.arrayAlloca = v.arrayAlloca || pLayout.aggregate || pLayout.arrayLike || argLayout.aggregate ||
+                                argLayout.arrayLike;
                 v.slots = std::max<size_t>(copySlotsCount, std::max<size_t>(v.slots, argSlots));
                 return true;
               }
@@ -940,7 +878,8 @@ namespace {
               auto forceCopy = [&](Value &v) {
                 if (copySlotsCount <= 1 && (pLayout.arrayLike || argLayout.arrayLike)) {
                   v.type = "ptr";
-                  v.arrayAlloca = v.arrayAlloca || pLayout.aggregate || pLayout.arrayLike || argLayout.aggregate || argLayout.arrayLike;
+                  v.arrayAlloca = v.arrayAlloca || pLayout.aggregate || pLayout.arrayLike || argLayout.aggregate ||
+                                  argLayout.arrayLike;
                   v.slots = std::max<size_t>(copySlotsCount, std::max<size_t>(v.slots, argSlots));
                   return;
                 }
@@ -955,7 +894,7 @@ namespace {
               };
               forceCopy(argV);
             }
-            (void)paramMutable;
+            (void) paramMutable;
             args.push_back(argV);
             auto &slotVec = g_paramMaxSlots[mangled];
             size_t idx = i + 1; // receiver occupies slot 0
@@ -1013,42 +952,44 @@ namespace {
           args.push_back(argV);
           continue;
         }
-          if (wantsAggregate) {
-            size_t copySlotsCount = std::max<size_t>(layout.slots, argSlots);
-            auto forwardIfReadonly = [&](Value &v) -> bool {
-              if (!paramMutable && v.type == "ptr") {
-                v.arrayAlloca = v.arrayAlloca || layout.aggregate || layout.arrayLike || argLayout.aggregate || argLayout.arrayLike;
-                v.slots = std::max<size_t>(copySlotsCount, std::max<size_t>(v.slots, argSlots));
-                return true;
-              }
-              return false;
-            };
-            if (!forwardIfReadonly(argV)) {
-              auto forceCopy = [&](Value &v) {
-                if (copySlotsCount <= 1 && (layout.arrayLike || argLayout.arrayLike)) {
-                  v.type = "ptr";
-                  v.arrayAlloca = v.arrayAlloca || layout.aggregate || layout.arrayLike || argLayout.aggregate || argLayout.arrayLike;
-                  v.slots = std::max<size_t>(copySlotsCount, std::max<size_t>(v.slots, argSlots));
-                  return;
-                }
-                std::string tmpAlloc = freshTemp(fn);
-                fn.body << "  " << tmpAlloc << " = alloca [" << copySlotsCount << " x i64]\n";
-                Value dst{tmpAlloc, "ptr", true, copySlotsCount};
-                copySlots(fn, v, dst, copySlotsCount);
-                v = dst;
-                v.type = "ptr";
-                v.slots = copySlotsCount;
-                v.arrayAlloca = true;
-              };
-              forceCopy(argV);
+        if (wantsAggregate) {
+          size_t copySlotsCount = std::max<size_t>(layout.slots, argSlots);
+          auto forwardIfReadonly = [&](Value &v) -> bool {
+            if (!paramMutable && v.type == "ptr") {
+              v.arrayAlloca = v.arrayAlloca || layout.aggregate || layout.arrayLike || argLayout.aggregate || argLayout.
+                              arrayLike;
+              v.slots = std::max<size_t>(copySlotsCount, std::max<size_t>(v.slots, argSlots));
+              return true;
             }
-          (void)paramMutable;
+            return false;
+          };
+          if (!forwardIfReadonly(argV)) {
+            auto forceCopy = [&](Value &v) {
+              if (copySlotsCount <= 1 && (layout.arrayLike || argLayout.arrayLike)) {
+                v.type = "ptr";
+                v.arrayAlloca = v.arrayAlloca || layout.aggregate || layout.arrayLike || argLayout.aggregate || argLayout.
+                                arrayLike;
+                v.slots = std::max<size_t>(copySlotsCount, std::max<size_t>(v.slots, argSlots));
+                return;
+              }
+              std::string tmpAlloc = freshTemp(fn);
+              fn.body << "  " << tmpAlloc << " = alloca [" << copySlotsCount << " x i64]\n";
+              Value dst{tmpAlloc, "ptr", true, copySlotsCount};
+              copySlots(fn, v, dst, copySlotsCount);
+              v = dst;
+              v.type = "ptr";
+              v.slots = copySlotsCount;
+              v.arrayAlloca = true;
+            };
+            forceCopy(argV);
+          }
+          (void) paramMutable;
           args.push_back(argV);
-            auto &slotVec = g_paramMaxSlots[fname];
-            if (slotVec.size() <= i) slotVec.resize(i + 1, 0);
-            size_t observedSlots = copySlotsCount;
-            observedSlots = std::max<size_t>(observedSlots, std::max<size_t>(argSlots, argV.slots));
-            slotVec[i] = std::max<size_t>(slotVec[i], observedSlots);
+          auto &slotVec = g_paramMaxSlots[fname];
+          if (slotVec.size() <= i) slotVec.resize(i + 1, 0);
+          size_t observedSlots = copySlotsCount;
+          observedSlots = std::max<size_t>(observedSlots, std::max<size_t>(argSlots, argV.slots));
+          slotVec[i] = std::max<size_t>(slotVec[i], observedSlots);
         } else {
           args.push_back(toI64(fn, argV));
         }
@@ -1190,7 +1131,8 @@ namespace {
           auto forceCopy = [&](Value &v) {
             if (copySlotsCount <= 1 && (pLayout.arrayLike || argLayout.arrayLike) && v.type == "ptr" && !v.arrayAlloca) {
               v.type = "ptr";
-              v.arrayAlloca = pLayout.aggregate || pLayout.arrayLike || argLayout.aggregate || argLayout.arrayLike || v.arrayAlloca;
+              v.arrayAlloca = pLayout.aggregate || pLayout.arrayLike || argLayout.aggregate || argLayout.arrayLike || v.
+                              arrayAlloca;
               v.slots = std::max<size_t>(copySlotsCount, std::max<size_t>(v.slots, argSlots));
               return;
             }
@@ -1204,7 +1146,7 @@ namespace {
             v.arrayAlloca = true;
           };
           forceCopy(argV);
-          (void)paramMutable;
+          (void) paramMutable;
           args.push_back(argV);
           auto &slotVec = g_paramMaxSlots[mangled];
           if (slotVec.size() <= i) slotVec.resize(i + 1, 0);
@@ -1307,7 +1249,7 @@ namespace {
           if (hasConst && repeatedConst == 0) {
             g_needsMemset = true;
             fn.body << "  call void @llvm.memset.p0.i64(ptr " << dst.name << ", i8 0, i64 "
-                    << (totalSlots * 8) << ", i1 false)\n";
+                << (totalSlots * 8) << ", i1 false)\n";
           } else {
             val = toI64(fn, val);
             for (size_t i = 0; i < elemCount; ++i) {
@@ -1419,7 +1361,7 @@ namespace {
       const std::string &thenLabel = !thenCont.empty() ? thenCont : (thenPred.empty() ? thenL : thenPred);
       const std::string &elseLabel = !elseCont.empty() ? elseCont : (elsePred.empty() ? elseL : elsePred);
       fn.body << "  " << tmp << " = phi i64 [ " << thenV.name << ", %" << thenLabel << " ], [ " << elseV.name << ", %" <<
-        elseLabel << " ]\n";
+          elseLabel << " ]\n";
       return {tmp, "i64"};
     }
 
@@ -1527,7 +1469,8 @@ namespace {
         return false;
       }();
       bool valueAddrOf = isAddrOfExpr(let->value.get());
-      bool varIsRef = isRefType(varType) || (varType && varType->isMutableRef) || annotatedRef || valueAddrOf || patternRef;
+      bool varIsRef = isRefType(varType) || (varType && varType->isMutableRef) || annotatedRef || valueAddrOf ||
+                      patternRef;
       if (varIsRef) {
         layout.aggregate = false;
         layout.arrayLike = false;
@@ -1645,7 +1588,7 @@ namespace {
         else if (asn->op == "|=") opcode = "or";
         else if (asn->op == "^=") opcode = "xor";
         else if (asn->op == "<<=") opcode = "shl";
-        else if (asn->op == ">>=" ) opcode = "ashr"; // signed shift
+        else if (asn->op == ">>=") opcode = "ashr"; // signed shift
         else opcode = "add";
         fn.body << "  " << tmp << " = " << opcode << " i64 " << curWrapped.name << ", " << rhsVal.name << "\n";
         return lhsIsRef ? Value{tmp, "i64"} : wrapToType(fn, {tmp, "i64"}, lhsType);
@@ -1934,7 +1877,8 @@ namespace {
         TypeRef base = stripRef(paramType);
         if (base && base->kind == BaseType::Array && base->arrayLength > 0) {
           size_t elemSlots = layoutOf(base->elementType).slots;
-          pLayout.slots = std::max<size_t>(pLayout.slots, std::max<size_t>(1, elemSlots * static_cast<size_t>(base->arrayLength)));
+          pLayout.slots = std::max<size_t>(pLayout.slots,
+                                           std::max<size_t>(1, elemSlots * static_cast<size_t>(base->arrayLength)));
         }
         size_t astLen = constArrayLengthFromTypeString(p.second);
         size_t elemSlots = layoutOf(paramType ? stripRef(paramType)->elementType : nullptr).slots;
@@ -1977,7 +1921,7 @@ namespace {
         }
       }
       bool paramMutable = (finfo && semanticIdx < finfo->paramMut.size()) ? finfo->paramMut[semanticIdx] : false;
-      (void)paramMutable;
+      (void) paramMutable;
       FunctionCtx::VarInfo info;
       info.type = paramType;
       info.layout = pLayout;
@@ -2095,8 +2039,6 @@ namespace {
   }
 
   bool writeModule(const fs::path &path, BlockStmtAST *program, std::string *textOut = nullptr) {
-    std::ofstream out(path, std::ios::trunc);
-    if (!out.is_open()) return false;
     std::ostringstream mod;
     mod << "; Autogenerated textual LLVM IR\n";
     mod << "source_filename = \"RCompiler\"\n\n";
@@ -2165,19 +2107,58 @@ namespace {
       emitStringFunctions(mod);
     }
 
-    // emit builtin declarations (implemented externally in builtin.c)
-    if (!g_declArity.empty()) {
-      mod << "declare i64 @printInt(i64)\n";
-      mod << "declare i64 @printlnInt(i64)\n";
-      mod << "declare i64 @printlnStr(ptr)\n";
-      mod << "declare i64 @getInt()\n";
-      mod << "declare void @exit_rt(i64)\n\n";
-      g_definedFuncs.insert("printInt");
-      g_definedFuncs.insert("printlnInt");
-      g_definedFuncs.insert("printlnStr");
-      g_definedFuncs.insert("getInt");
-      g_definedFuncs.insert("exit_rt");
-    }
+    // emit builtin implementations directly in IR so generated code is runnable without external runtime
+    mod << "declare i32 @printf(ptr, ...)\n";
+    mod << "declare i32 @scanf(ptr, ...)\n";
+    mod << "declare void @exit(i32)\n\n";
+
+    mod << R"(@.fmt_int = private unnamed_addr constant [4 x i8] c"%ld\00")" << "\n";
+    mod << R"(@.fmt_int_nl = private unnamed_addr constant [5 x i8] c"%ld\0A\00")" << "\n";
+    mod << R"(@.fmt_str_nl = private unnamed_addr constant [4 x i8] c"%s\0A\00")" << "\n";
+    mod << R"(@.fmt_scan_int = private unnamed_addr constant [4 x i8] c"%ld\00")" << "\n\n";
+
+    mod << "define i64 @printInt(i64 %x) {\n";
+    mod << "entry:\n";
+    mod << "  %fmt = getelementptr inbounds [4 x i8], ptr @.fmt_int, i64 0, i64 0\n";
+    mod << "  call i32 (ptr, ...) @printf(ptr %fmt, i64 %x)\n";
+    mod << "  ret i64 %x\n";
+    mod << "}\n\n";
+
+    mod << "define i64 @printlnInt(i64 %x) {\n";
+    mod << "entry:\n";
+    mod << "  %fmt = getelementptr inbounds [5 x i8], ptr @.fmt_int_nl, i64 0, i64 0\n";
+    mod << "  call i32 (ptr, ...) @printf(ptr %fmt, i64 %x)\n";
+    mod << "  ret i64 %x\n";
+    mod << "}\n\n";
+
+    mod << "define i64 @printlnStr(ptr %s) {\n";
+    mod << "entry:\n";
+    mod << "  %fmt = getelementptr inbounds [4 x i8], ptr @.fmt_str_nl, i64 0, i64 0\n";
+    mod << "  call i32 (ptr, ...) @printf(ptr %fmt, ptr %s)\n";
+    mod << "  ret i64 0\n";
+    mod << "}\n\n";
+
+    mod << "define i64 @getInt() {\n";
+    mod << "entry:\n";
+    mod << "  %tmp = alloca i64, align 8\n";
+    mod << "  %fmt = getelementptr inbounds [4 x i8], ptr @.fmt_scan_int, i64 0, i64 0\n";
+    mod << "  call i32 (ptr, ...) @scanf(ptr %fmt, ptr %tmp)\n";
+    mod << "  %v = load i64, ptr %tmp, align 8\n";
+    mod << "  ret i64 %v\n";
+    mod << "}\n\n";
+
+    mod << "define void @exit_rt(i64 %code) {\n";
+    mod << "entry:\n";
+    mod << "  %c32 = trunc i64 %code to i32\n";
+    mod << "  call void @exit(i32 %c32)\n";
+    mod << "  unreachable\n";
+    mod << "}\n\n";
+
+    g_definedFuncs.insert("printInt");
+    g_definedFuncs.insert("printlnInt");
+    g_definedFuncs.insert("printlnStr");
+    g_definedFuncs.insert("getInt");
+    g_definedFuncs.insert("exit_rt");
 
     if (g_needsMemset) {
       mod << "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n\n";
@@ -2200,8 +2181,13 @@ namespace {
       mod << "define i64 @main() {\nentry:\n  ret i64 0\n}\n";
     }
 
-    if (textOut) *textOut = mod.str();
-    out << mod.str();
+    const std::string irStr = mod.str();
+    if (textOut) *textOut = irStr;
+    if (!path.empty()) {
+      std::ofstream out(path, std::ios::trunc);
+      if (!out.is_open()) return false;
+      out << irStr;
+    }
     return true;
   }
 
@@ -2260,28 +2246,28 @@ namespace {
         "}\n";
     std::cerr << kBuiltin;
   }
-} // namespace
 
-bool generate_ir(BlockStmtAST *program, SemanticAnalyzer &analyzer, const std::string &inputPath, bool emitLLVM) {
-  g_analyzer = &analyzer;
-  g_structLayouts.clear();
-  g_paramMaxSlots.clear();
-  g_needsMemset = false;
-  g_needsMemcpy = false;
-  g_needsMalloc = false;
-  if (!emitLLVM) return true;
-  if (!program) {
-    throw std::runtime_error("IR generation failed: null program");
+  bool generate_ir(BlockStmtAST *program, SemanticAnalyzer &analyzer, const std::string &inputPath, bool emitLLVM) {
+    g_analyzer = &analyzer;
+    g_structLayouts.clear();
+    g_paramMaxSlots.clear();
+    g_needsMemset = false;
+    g_needsMemcpy = false;
+    g_needsMalloc = false;
+    if (!emitLLVM) return true;
+    if (!program) {
+      throw std::runtime_error("IR generation failed: null program");
+    }
+    const bool writeToFile = !(inputPath.empty() || inputPath == "-");
+    const fs::path llPath = writeToFile ? deriveLlPath(inputPath) : fs::path();
+    std::string irText;
+    if (!writeModule(llPath, program, &irText)) {
+      throw std::runtime_error("IR generation failed: cannot create " + llPath.string());
+    }
+    // Also emit IR to stdout for evaluation harnesses
+    std::cout << irText;
+    emitBuiltinCToStderr();
+    return true;
   }
-  const fs::path llPath = deriveLlPath(inputPath);
-  std::string irText;
-  if (!writeModule(llPath, program, &irText)) {
-    throw std::runtime_error("IR generation failed: cannot create " + llPath.string());
-  }
-  // Also emit IR to stdout for evaluation harnesses
-  std::cout << irText;
-  emitBuiltinCToStderr();
-  return true;
 }
-
 //llvm语法相关由copilot辅助生成

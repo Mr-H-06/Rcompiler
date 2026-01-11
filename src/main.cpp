@@ -110,14 +110,16 @@ int main(int argc, char** argv) {
     
     // 4. IR生成：将AST转换为LLVM IR
     if (emitLLVM) {
-      const std::string irInputPath = (argc > 1) ? std::string(argv[1]) : "../test_case/test_case.in";
+      // When no explicit file is provided (stdin/test), emit IR only to stdout (no .ll on disk)
+      const bool haveInputFile = (argc > 1 && std::string(argv[1]) != "-" && std::string(argv[1]) != "--use-test-input");
+      const std::string irInputPath = haveInputFile ? std::string(argv[1]) : std::string();
       try {
-        if (!generate_ir(ast.get(), analyzer, irInputPath, emitLLVM)) {
+        if (!IRGen::generate_ir(ast.get(), analyzer, irInputPath, emitLLVM)) {
           return 0; // 编译成功但IR生成报告失败
         }
       } catch (const std::exception &irEx) {
         std::cerr << "IR generation failed: " << irEx.what() << std::endl;
-        return 0; // 按要求：将IR失败视为成功退出
+        return 0; // 将IR失败视为成功退出
       }
     }
   } catch (const std::exception& ex) {

@@ -374,6 +374,7 @@ SemanticAnalyzer::SemanticAnalyzer() {
 }
 
 bool SemanticAnalyzer::analyze(BlockStmtAST *program) {
+  // Full semantic pipeline: collect declarations first, then analyze bodies so forward references work.
   reset();
   if (!program) {
     return true;
@@ -383,42 +384,6 @@ bool SemanticAnalyzer::analyze(BlockStmtAST *program) {
   collectFunctionDeclarations(program);
   analyzeTopLevel(program);
   return issues.empty();
-}
-
-void SemanticAnalyzer::reset() {
-  symbols = SymbolTable();
-  symbols.enterScope();
-  issues.clear();
-  structs.clear();
-  enums.clear();
-  functions.clear();
-  methods.clear();
-  currentReturn.reset();
-  currentImplType.clear();
-  loopDepth = 0;
-  constIntValues.clear();
-  exprTypes.clear();
-  registerBuiltins();
-}
-
-void SemanticAnalyzer::registerBuiltins() {
-  const auto voidType = TypeFactory::getVoid();
-  auto registerBuiltin = [&](const std::string &name,
-                             const std::vector<TypeRef> &params,
-                             const TypeRef &retType) {
-    auto returnType = retType ? retType : voidType;
-    FunctionInfo info;
-    info.name = name;
-    info.params = params;
-    info.returnType = returnType;
-    functions[name] = info;
-    Symbol symbol{name, SymbolKind::Function, TypeFactory::makeFunction(params, returnType), false};
-    symbols.addSymbol(symbol);
-  };
-
-  registerBuiltin("printInt", {TypeFactory::getInt()}, voidType);
-  registerBuiltin("printlnInt", {TypeFactory::getInt()}, voidType);
-  registerBuiltin("getInt", {}, TypeFactory::getInt());
 }
 
 void SemanticAnalyzer::collectTypeDeclarations(BlockStmtAST *program) {
@@ -448,6 +413,7 @@ void SemanticAnalyzer::collectConstDeclarations(BlockStmtAST *program) {
   }
 
   bool progress = true;
+  // Evaluate const integers in a small fixed-point loop so later consts can depend on earlier ones.
   while (progress) {
     progress = false;
     for (auto *constStmt: pending) {
@@ -901,6 +867,7 @@ void SemanticAnalyzer::analyzeLet(LetStmtAST *stmt, bool isConst) {
     return;
   }
 
+  // Resolve annotation (if any) before inspecting initializer so we can enforce assignability in both directions.
   TypeRef annotated;
   if (!stmt->type.empty()) {
     annotated = resolveTypeName(stmt->type, currentImplType);
@@ -974,6 +941,7 @@ void SemanticAnalyzer::analyzeStatic(StaticStmtAST *stmt) {
 }
 
 void SemanticAnalyzer::analyzeAssign(AssignStmtAST *stmt) {
+  // First ensure the target is mutable (including mutable references), then verify type compatibility.
   auto lhsVar = dynamic_cast<VariableExprAST *>(stmt->lhs_expr.get());
   if (lhsVar) {
     const Symbol *symbol = symbols.lookup(lhsVar->name);
