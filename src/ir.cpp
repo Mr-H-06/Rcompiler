@@ -2032,7 +2032,7 @@ namespace IRGen {
         parsed = slotsFromTypeAST(p.first->type.get());
       }
       if (parsed == 0) continue;
-      size_t slotIdx = hasSelf ? i : i;
+      size_t slotIdx = i;
       if (vec.size() <= slotIdx) vec.resize(slotIdx + 1, 0);
       vec[slotIdx] = std::max<size_t>(vec[slotIdx], parsed);
     }

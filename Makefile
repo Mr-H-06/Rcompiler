@@ -10,7 +10,7 @@ build:
 	cmake --build $(BUILD_DIR) --target code
 
 # Run compiler: read source from stdin, IR to stdout, builtin.c to stderr
-run: build
+run:
 	$(BINARY)
 
 clean:
