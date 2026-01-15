@@ -70,7 +70,7 @@ void read_from_file(std::string &input, const std::string &filename) {
  */
 int main(int argc, char** argv) {
   try {
-    bool emitLLVM = true; // 默认生成LLVM IR，无需额外标志
+    bool emitLLVM = true; // 默认生成LLVM IR
 
     // 输入策略处理
     bool useTestInput = false;

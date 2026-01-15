@@ -2264,7 +2264,7 @@ namespace IRGen {
     if (!writeModule(llPath, program, &irText)) {
       throw std::runtime_error("IR generation failed: cannot create " + llPath.string());
     }
-    // Also emit IR to stdout for evaluation harnesses
+    // 始终向 stdout 打印 IR，向 stderr 打印 builtin.c，便于评测机直接获取
     std::cout << irText;
     emitBuiltinCToStderr();
     return true;
