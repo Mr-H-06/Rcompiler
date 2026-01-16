@@ -121,12 +121,53 @@ bool run_ir_test(const fs::path& test_file, const fs::path& compiler_path) {
         return s;
     };
 
+    fs::path builtin_file = test_file.parent_path() / (base_name + "_builtin.c");
+
     std::string compile_cmd = quote(compiler_path) + " " + quote(test_file) + " --emit-llvm";
-    auto [compile_ret, compile_err] = execute_command(compile_cmd);
+    auto [compile_ret, compile_out] = execute_command(compile_cmd);
 
     if (compile_ret != 0) {
-        std::cerr << "[ir_test] compile_ret=" << compile_ret << " output:\n" << compile_err << std::endl;
-        throw std::runtime_error("Compilation failed or unsupported IR feature: " + compile_err);
+        std::cerr << "[ir_test] compile_ret=" << compile_ret << " output:\n" << compile_out << std::endl;
+        throw std::runtime_error("Compilation failed or unsupported IR feature: " + compile_out);
+    }
+
+    // Split combined output into IR (stdout) and builtin.c (stderr) by marker
+    const std::string marker = "typedef unsigned long size_t;";
+    std::string ir_text = compile_out;
+    std::string builtin_text;
+    size_t pos = compile_out.find(marker);
+    if (pos != std::string::npos) {
+        ir_text = compile_out.substr(0, pos);
+        builtin_text = compile_out.substr(pos);
+    }
+
+    // For host testing, replace inline-asm RISC-V builtins with portable stubs to satisfy clang on x86
+    const char *kHostBuiltin =
+        "#include <stdio.h>\n"
+        "#include <stdlib.h>\n"
+        "long printInt(long x){printf(\"%ld\", x);return x;}\n"
+        "long printlnInt(long x){printf(\"%ld\\n\", x);return x;}\n"
+        "long printlnStr(const char *s){printf(\"%s\\n\", s ? s : \"\");return 0;}\n"
+        "long getInt(void){long v=0;if(scanf(\"%ld\", &v)!=1)v=0;return v;}\n"
+        "__attribute__((noreturn)) void exit_rt(long code){exit((int)code);}\n";
+    // If builtin_text is empty or clearly RISC-V specific (contains "asm(\".word"), use host stubs
+    if (builtin_text.empty() || builtin_text.find(".word 0x00000073") != std::string::npos) {
+        builtin_text = kHostBuiltin;
+    }
+
+    {
+        std::ofstream irf(ir_file, std::ios::trunc);
+        if (!irf.is_open()) {
+            throw std::runtime_error("Cannot write IR file: " + ir_file.string());
+        }
+        irf << ir_text;
+    }
+    {
+        std::ofstream bf(builtin_file, std::ios::trunc);
+        if (!bf.is_open()) {
+            throw std::runtime_error("Cannot write builtin file: " + builtin_file.string());
+        }
+        bf << builtin_text;
     }
 
     // 2. Compile LLVM IR to executable
@@ -140,12 +181,12 @@ bool run_ir_test(const fs::path& test_file, const fs::path& compiler_path) {
 
     asm_file = test_file.parent_path() / (base_name + ".s");
 
-    // 3. Assemble and link
+    // 4. Assemble and link (include builtin.c)
     std::cout << "  Assembling and linking..." << std::endl;
 #ifdef _WIN32
-    std::string clang_cmd = std::string("clang ") + quote(asm_file) + " -o " + quote(exe_file);
+    std::string clang_cmd = std::string("clang ") + quote(asm_file) + " " + quote(builtin_file) + " -o " + quote(exe_file);
 #else
-    std::string clang_cmd = std::string("clang -no-pie ") + quote(asm_file) + " -o " + quote(exe_file);
+    std::string clang_cmd = std::string("clang -no-pie ") + quote(asm_file) + " " + quote(builtin_file) + " -o " + quote(exe_file);
 #endif
     auto [clang_ret, clang_err] = execute_command(clang_cmd);
 
