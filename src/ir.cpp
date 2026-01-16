@@ -2107,52 +2107,15 @@ namespace IRGen {
       emitStringFunctions(mod);
     }
 
-    // emit builtin implementations directly in IR so generated code is runnable without external runtime
+    // emit builtin declarations; implementations provided via builtin.c on stderr
     mod << "declare i32 @printf(ptr, ...)\n";
     mod << "declare i32 @scanf(ptr, ...)\n";
-    mod << "declare void @exit(i32)\n\n";
-
-    mod << R"(@.fmt_int = private unnamed_addr constant [4 x i8] c"%ld\00")" << "\n";
-    mod << R"(@.fmt_int_nl = private unnamed_addr constant [5 x i8] c"%ld\0A\00")" << "\n";
-    mod << R"(@.fmt_str_nl = private unnamed_addr constant [4 x i8] c"%s\0A\00")" << "\n";
-    mod << R"(@.fmt_scan_int = private unnamed_addr constant [4 x i8] c"%ld\00")" << "\n\n";
-
-    mod << "define i64 @printInt(i64 %x) {\n";
-    mod << "entry:\n";
-    mod << "  %fmt = getelementptr inbounds [4 x i8], ptr @.fmt_int, i64 0, i64 0\n";
-    mod << "  call i32 (ptr, ...) @printf(ptr %fmt, i64 %x)\n";
-    mod << "  ret i64 %x\n";
-    mod << "}\n\n";
-
-    mod << "define i64 @printlnInt(i64 %x) {\n";
-    mod << "entry:\n";
-    mod << "  %fmt = getelementptr inbounds [5 x i8], ptr @.fmt_int_nl, i64 0, i64 0\n";
-    mod << "  call i32 (ptr, ...) @printf(ptr %fmt, i64 %x)\n";
-    mod << "  ret i64 %x\n";
-    mod << "}\n\n";
-
-    mod << "define i64 @printlnStr(ptr %s) {\n";
-    mod << "entry:\n";
-    mod << "  %fmt = getelementptr inbounds [4 x i8], ptr @.fmt_str_nl, i64 0, i64 0\n";
-    mod << "  call i32 (ptr, ...) @printf(ptr %fmt, ptr %s)\n";
-    mod << "  ret i64 0\n";
-    mod << "}\n\n";
-
-    mod << "define i64 @getInt() {\n";
-    mod << "entry:\n";
-    mod << "  %tmp = alloca i64, align 8\n";
-    mod << "  %fmt = getelementptr inbounds [4 x i8], ptr @.fmt_scan_int, i64 0, i64 0\n";
-    mod << "  call i32 (ptr, ...) @scanf(ptr %fmt, ptr %tmp)\n";
-    mod << "  %v = load i64, ptr %tmp, align 8\n";
-    mod << "  ret i64 %v\n";
-    mod << "}\n\n";
-
-    mod << "define void @exit_rt(i64 %code) {\n";
-    mod << "entry:\n";
-    mod << "  %c32 = trunc i64 %code to i32\n";
-    mod << "  call void @exit(i32 %c32)\n";
-    mod << "  unreachable\n";
-    mod << "}\n\n";
+    mod << "declare void @exit(i32)\n";
+    mod << "declare i64 @printInt(i64)\n";
+    mod << "declare i64 @printlnInt(i64)\n";
+    mod << "declare i64 @printlnStr(ptr)\n";
+    mod << "declare i64 @getInt()\n";
+    mod << "declare void @exit_rt(i64)\n\n";
 
     g_definedFuncs.insert("printInt");
     g_definedFuncs.insert("printlnInt");
