@@ -783,8 +783,21 @@ namespace IRGen {
       }
       auto elemLayout = layoutOf(elemType);
       size_t elemSlots = std::max<size_t>(1, elemLayout.slots);
+      size_t totalSlots = basePtr.slots ? basePtr.slots : arrLayout.slots;
+      std::string safeIdx = index.name;
+      if (totalSlots > 0) {
+        std::string nonNeg = freshTemp(fn);
+        fn.body << "  " << nonNeg << " = icmp sge i64 " << index.name << ", 0\n";
+        std::string inRange = freshTemp(fn);
+        fn.body << "  " << inRange << " = icmp slt i64 " << index.name << ", " << (totalSlots / elemSlots)
+            << "\n";
+        std::string idxOk = freshTemp(fn);
+        fn.body << "  " << idxOk << " = and i1 " << nonNeg << ", " << inRange << "\n";
+        safeIdx = freshTemp(fn);
+        fn.body << "  " << safeIdx << " = select i1 " << idxOk << ", i64 " << index.name << ", i64 0\n";
+      }
       std::string scaled = freshTemp(fn);
-      fn.body << "  " << scaled << " = mul i64 " << index.name << ", " << elemSlots << "\n";
+      fn.body << "  " << scaled << " = mul i64 " << safeIdx << ", " << elemSlots << "\n";
       std::string elemPtr = basePtr.arrayAlloca ? freshTemp(fn) : freshTemp(fn);
       if (basePtr.arrayAlloca) {
         fn.body << "  " << elemPtr << " = getelementptr [" << basePtr.slots << " x i64], ptr " << basePtr.name <<
