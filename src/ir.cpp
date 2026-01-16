@@ -2270,4 +2270,3 @@ namespace IRGen {
     return true;
   }
 }
-//llvm语法相关由copilot辅助生成

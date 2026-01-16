@@ -11,7 +11,7 @@ build:
 
 # Run compiler: read source from stdin, IR to stdout, builtin.c to stderr
 run:
-	$(BINARY)
+	@$(BINARY)
 
 clean:
 	rm -rf $(BUILD_DIR)
