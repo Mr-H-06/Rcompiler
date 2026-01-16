@@ -4,6 +4,7 @@ namespace IRGen {
   bool g_needsMemset = false;
   bool g_needsMemcpy = false;
   bool g_needsMalloc = false;
+  bool g_needsIdxClamp = false;
 
   // 全局变量定义
   std::unordered_map<std::string, size_t> g_declArity;
@@ -218,6 +219,15 @@ namespace IRGen {
   TypeRef stripRef(const TypeRef &t) {
     if (!g_analyzer) return t;
     return g_analyzer->stripReference(t);
+  }
+
+  // Clamp index into [0, len-1]; len<=0 yields 0.
+  std::string clampIndex(FunctionCtx &fn, const std::string &idxName, size_t lenElems) {
+    if (lenElems == 0) return idxName;
+    g_needsIdxClamp = true;
+    std::string tmp = freshTemp(fn);
+    fn.body << "  " << tmp << " = call i64 @__idx_clamp(i64 " << idxName << ", i64 " << lenElems << ")\n";
+    return tmp;
   }
 
   std::unordered_map<std::string, std::vector<std::tuple<std::string, size_t, size_t, TypeRef> > > g_structLayouts;
@@ -783,21 +793,14 @@ namespace IRGen {
       }
       auto elemLayout = layoutOf(elemType);
       size_t elemSlots = std::max<size_t>(1, elemLayout.slots);
-      size_t totalSlots = basePtr.slots ? basePtr.slots : arrLayout.slots;
-      std::string safeIdx = index.name;
-      if (totalSlots > 0) {
-        std::string nonNeg = freshTemp(fn);
-        fn.body << "  " << nonNeg << " = icmp sge i64 " << index.name << ", 0\n";
-        std::string inRange = freshTemp(fn);
-        fn.body << "  " << inRange << " = icmp slt i64 " << index.name << ", " << (totalSlots / elemSlots)
-            << "\n";
-        std::string idxOk = freshTemp(fn);
-        fn.body << "  " << idxOk << " = and i1 " << nonNeg << ", " << inRange << "\n";
-        safeIdx = freshTemp(fn);
-        fn.body << "  " << safeIdx << " = select i1 " << idxOk << ", i64 " << index.name << ", i64 0\n";
+      size_t lenElems = (stripped && stripped->kind == BaseType::Array && stripped->hasArrayLength && stripped->arrayLength > 0)
+                        ? static_cast<size_t>(stripped->arrayLength) : 0;
+      std::string idxName = index.name;
+      if (lenElems > 0) {
+        idxName = clampIndex(fn, idxName, lenElems);
       }
       std::string scaled = freshTemp(fn);
-      fn.body << "  " << scaled << " = mul i64 " << safeIdx << ", " << elemSlots << "\n";
+      fn.body << "  " << scaled << " = mul i64 " << idxName << ", " << elemSlots << "\n";
       std::string elemPtr = basePtr.arrayAlloca ? freshTemp(fn) : freshTemp(fn);
       if (basePtr.arrayAlloca) {
         fn.body << "  " << elemPtr << " = getelementptr [" << basePtr.slots << " x i64], ptr " << basePtr.name <<
@@ -1631,8 +1634,14 @@ namespace IRGen {
         TypeRef elemType = (stripped && stripped->kind == BaseType::Array) ? stripped->elementType : nullptr;
         auto elemLayout = layoutOf(elemType);
         size_t elemSlots = std::max<size_t>(1, elemLayout.slots);
+        size_t lenElems = (stripped && stripped->kind == BaseType::Array && stripped->hasArrayLength && stripped->arrayLength > 0)
+                          ? static_cast<size_t>(stripped->arrayLength) : 0;
+        std::string idxName = index.name;
+        if (lenElems > 0) {
+          idxName = clampIndex(fn, idxName, lenElems);
+        }
         std::string scaled = freshTemp(fn);
-        fn.body << "  " << scaled << " = mul i64 " << index.name << ", " << elemSlots << "\n";
+        fn.body << "  " << scaled << " = mul i64 " << idxName << ", " << elemSlots << "\n";
         std::string elemPtr = basePtr.arrayAlloca ? freshTemp(fn) : freshTemp(fn);
         if (basePtr.arrayAlloca && basePtr.slots > 1) {
           fn.body << "  " << elemPtr << " = getelementptr [" << basePtr.slots << " x i64], ptr " << basePtr.name <<
@@ -2120,6 +2129,23 @@ namespace IRGen {
       emitStringFunctions(mod);
     }
 
+    if (g_needsIdxClamp) {
+      mod << "define i64 @__idx_clamp(i64 %idx, i64 %len) {\n";
+      mod << "entry:\n";
+      mod << "  %lenpos = icmp sgt i64 %len, 0\n";
+      mod << "  br i1 %lenpos, label %body, label %ret0\n";
+      mod << "body:\n";
+      mod << "  %neg = icmp slt i64 %idx, 0\n";
+      mod << "  %nz = select i1 %neg, i64 0, i64 %idx\n";
+      mod << "  %in = icmp slt i64 %nz, %len\n";
+      mod << "  %res = select i1 %in, i64 %nz, i64 0\n";
+      mod << "  ret i64 %res\n";
+      mod << "ret0:\n";
+      mod << "  ret i64 0\n";
+      mod << "}\n\n";
+      g_definedFuncs.insert("__idx_clamp");
+    }
+
     // emit builtin declarations; implementations provided via builtin.c on stderr
     mod << "declare i32 @printf(ptr, ...)\n";
     mod << "declare i32 @scanf(ptr, ...)\n";
@@ -2303,6 +2329,7 @@ namespace IRGen {
     g_needsMemset = false;
     g_needsMemcpy = false;
     g_needsMalloc = false;
+    g_needsIdxClamp = false;
     if (!emitLLVM) return true;
     if (!program) {
       throw std::runtime_error("IR generation failed: null program");
