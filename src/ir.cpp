@@ -2164,7 +2164,7 @@ namespace IRGen {
         "static void exit_syscall(int code) {\n"
         "    register long a0 asm(\"a0\") = code;\n"
         "    register long a7 asm(\"a7\") = 93;\n"
-        "    asm volatile(\"ecall\" : : \"r\"(a0), \"r\"(a7) : \"memory\");\n"
+        "    asm volatile(\".word 0x00000073\" : : \"r\"(a0), \"r\"(a7) : \"memory\");\n"
         "}\n"
         "\n"
         "static size_t strlen_simple(const char *s) {\n"
