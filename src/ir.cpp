@@ -235,7 +235,7 @@ namespace IRGen {
     return g_analyzer->stripReference(t);
   }
 
-  // Clamp index into [0, len+1]; len<=0 yields original.
+  // Clamp index into [-1, len]; len<=0 leaves it unchanged.
   std::string clampIndex(FunctionCtx &fn, const std::string &idxName, size_t lenElems) {
     if (lenElems == 0) return idxName;
     g_needsIdxClamp = true;
@@ -555,15 +555,9 @@ namespace IRGen {
       TypeRef elemType = (stripped && stripped->kind == BaseType::Array) ? stripped->elementType : nullptr;
       TypeLayout elemLayout = layoutOf(elemType);
       size_t elemSlots = std::max<size_t>(1, elemLayout.slots);
-      size_t lenElems = (stripped && stripped->kind == BaseType::Array && stripped->hasArrayLength && stripped->arrayLength > 0)
-                        ? static_cast<size_t>(stripped->arrayLength) : 0;
       auto index = toI64(fn, emitExpr(fn, idx->index_expr.get()));
-      std::string idxName = index.name;
-      if (lenElems > 0) {
-        idxName = clampIndex(fn, idxName, lenElems);
-      }
       std::string scaled = freshTemp(fn);
-      fn.body << "  " << scaled << " = mul i64 " << idxName << ", " << elemSlots << "\n";
+      fn.body << "  " << scaled << " = mul i64 " << index.name << ", " << elemSlots << "\n";
       std::string elemPtr = freshTemp(fn);
       if (basePtr.arrayAlloca && basePtr.slots > 1) {
         fn.body << "  " << elemPtr << " = getelementptr [" << basePtr.slots << " x i64], ptr " << basePtr.name <<
@@ -2131,15 +2125,14 @@ namespace IRGen {
       mod << "define i64 @__idx_clamp(i64 %idx, i64 %len) {\n";
       mod << "entry:\n";
       mod << "  %lenpos = icmp sgt i64 %len, 0\n";
-      mod << "  br i1 %lenpos, label %body, label %ret0\n";
+      mod << "  br i1 %lenpos, label %body, label %ret_orig\n";
       mod << "body:\n";
-      mod << "  %neg = icmp slt i64 %idx, 0\n";
-      mod << "  %nz = select i1 %neg, i64 0, i64 %idx\n";
-      mod << "  %lenp1 = add i64 %len, 1\n";
-      mod << "  %hi = icmp sgt i64 %nz, %lenp1\n";
-      mod << "  %clamped = select i1 %hi, i64 %lenp1, i64 %nz\n";
+      mod << "  %ltneg1 = icmp slt i64 %idx, -1\n";
+      mod << "  %lo = select i1 %ltneg1, i64 -1, i64 %idx\n";
+      mod << "  %hi = icmp sgt i64 %lo, %len\n";
+      mod << "  %clamped = select i1 %hi, i64 %len, i64 %lo\n";
       mod << "  ret i64 %clamped\n";
-      mod << "ret0:\n";
+      mod << "ret_orig:\n";
       mod << "  ret i64 %idx\n";
       mod << "}\n\n";
       g_definedFuncs.insert("__idx_clamp");
