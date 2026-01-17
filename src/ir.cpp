@@ -2182,7 +2182,7 @@ namespace IRGen {
   }
 
   void emitBuiltinCToStderr() {
-    // Minimal builtin: avoid nested definitions; provide IO, memcpy/memset wrappers, and a global __mulsi3.
+    // Minimal builtin with libgcc helpers and a real exit syscall.
     static const char *kBuiltin =
       "typedef unsigned long size_t;\n"
       "int printf(const char *fmt, ...);\n"
@@ -2191,12 +2191,20 @@ namespace IRGen {
       "void *memcpy(void *, const void *, size_t);\n"
       "void *memset(void *, int, size_t);\n"
       "\n"
+      "static void exit_syscall(int code){ register long a0 asm(\"a0\") = code; register long a7 asm(\"a7\") = 93; asm volatile(\"ecall\" : : \"r\"(a0), \"r\"(a7) : \"memory\"); while(1){} }\n"
+      "__attribute__((noreturn)) void exit_rt(long code){ exit_syscall((int)code); }\n"
+      "void abort(void){ exit_rt(1); }\n"
+      "void __stack_chk_fail(void){ exit_rt(1); }\n"
+      "\n"
       "int __mulsi3(int a, int b) { return a * b; }\n"
       "long long __muldi3(long long a, long long b) { return a * b; }\n"
-      "long long __divdi3(long long a, long long b) { return a / b; }\n"
-      "long long __moddi3(long long a, long long b) { return a % b; }\n"
+      "long long __divdi3(long long a, long long b) { return b ? a / b : 0; }\n"
+      "long long __moddi3(long long a, long long b) { return b ? a % b : 0; }\n"
       "unsigned long long __udivdi3(unsigned long long a, unsigned long long b) { return b ? a / b : 0ULL; }\n"
       "unsigned long long __umoddi3(unsigned long long a, unsigned long long b) { return b ? a % b : 0ULL; }\n"
+      "long long __ashldi3(long long a, int b) { return a << b; }\n"
+      "long long __lshrdi3(long long a, int b) { return (unsigned long long)a >> b; }\n"
+      "long long __ashrdi3(long long a, int b) { return a >> b; }\n"
       "\n"
       "void print(char *str) { printf(\"%s\", str); }\n"
       "void println(char *str) { printf(\"%s\\n\", str); }\n"
@@ -2205,8 +2213,7 @@ namespace IRGen {
       "char *getString() { char *buf = (char*)malloc(256); if (buf) scanf(\"%255s\", buf); return buf; }\n"
       "int getInt() { int v=0; scanf(\"%d\", &v); return v; }\n"
       "void* builtin_memset(void* dest, int ch, size_t n) { return memset(dest, ch, n); }\n"
-      "void* builtin_memcpy(void* dest, const void* src, size_t n) { return memcpy(dest, src, n); }\n"
-      "__attribute__((noreturn)) void exit_rt(long code) { (void)code; while(1){} }\n";
+      "void* builtin_memcpy(void* dest, const void* src, size_t n) { return memcpy(dest, src, n); }\n";
     std::cerr << kBuiltin;
   }
 
