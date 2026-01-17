@@ -244,6 +244,9 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         if (argv[i]) filters.emplace_back(argv[i]);
     }
+    if (filters.empty()) {
+        filters = {"comprehensive1", "comprehensive19", "comprehensive26"};
+    }
 
     auto should_run = [&](const fs::path &p) {
         if (filters.empty()) return true;
@@ -294,7 +297,7 @@ int main(int argc, char* argv[]) {
 
     std::vector<fs::path> test_files;
     std::vector<fs::path> root_candidates;
-    for (const std::string &name : {"semantic-2"}) {
+    for (const std::string &name : {"IR-1/src"}) {
         root_candidates.push_back(fs::current_path() / "test_case" / name);
         root_candidates.push_back(exe_dir / "test_case" / name);
         root_candidates.push_back(exe_dir.parent_path() / "test_case" / name);

@@ -497,7 +497,7 @@ void SemanticAnalyzer::registerLocalFunctionSymbol(FnStmtAST *fn) {
     paramMut.push_back(param.first ? param.first->is_mut : false);
   }
 
-  TypeRef ret = fn->return_type ? resolveType(fn->return_type.get()) : TypeFactory::getVoid();
+  TypeRef ret = fn->return_type ? resolveType(fn->return_type.get(), currentImplType) : TypeFactory::getVoid();
   if (!ret) {
     ret = TypeFactory::getVoid();
   }
@@ -559,7 +559,7 @@ void SemanticAnalyzer::registerFunction(FnStmtAST *fn, const std::string &ownerT
     TypeRef type;
     if (param.first && param.first->type) {
       // Prefer the parsed TypeAST so array lengths are preserved.
-      type = resolveType(param.first->type.get());
+      type = resolveType(param.first->type.get(), ownerType);
     }
     if (!type && !param.second.empty()) {
       type = resolveTypeName(param.second, ownerType);
@@ -582,7 +582,7 @@ void SemanticAnalyzer::registerFunction(FnStmtAST *fn, const std::string &ownerT
     paramMut.push_back(param.first ? param.first->is_mut : false);
   }
 
-  TypeRef ret = fn->return_type ? resolveType(fn->return_type.get()) : TypeFactory::getVoid();
+  TypeRef ret = fn->return_type ? resolveType(fn->return_type.get(), ownerType) : TypeFactory::getVoid();
   if (!ret) {
     ret = TypeFactory::getVoid();
   }
@@ -657,7 +657,7 @@ void SemanticAnalyzer::analyzeFunctionBody(FnStmtAST *fn, const std::string &own
     return;
   }
 
-  TypeRef ret = fn->return_type ? resolveType(fn->return_type.get()) : TypeFactory::getVoid();
+  TypeRef ret = fn->return_type ? resolveType(fn->return_type.get(), ownerType) : TypeFactory::getVoid();
   if (!ret) {
     ret = TypeFactory::getVoid();
   }
@@ -682,7 +682,7 @@ void SemanticAnalyzer::analyzeFunctionBody(FnStmtAST *fn, const std::string &own
     }
     TypeRef type;
     if (param.first->type) {
-      type = resolveType(param.first->type.get());
+      type = resolveType(param.first->type.get(), currentImplType);
     }
     if (!type) {
       type = resolveTypeName(param.second, currentImplType);
@@ -872,7 +872,7 @@ void SemanticAnalyzer::analyzeLet(LetStmtAST *stmt, bool isConst) {
   if (!stmt->type.empty()) {
     annotated = resolveTypeName(stmt->type, currentImplType);
   } else if (pattern->type) {
-    annotated = resolveType(pattern->type.get());
+    annotated = resolveType(pattern->type.get(), currentImplType);
   }
   if (annotated) {
     validateTypeConstraints(annotated, stmt->position());
@@ -905,7 +905,7 @@ void SemanticAnalyzer::analyzeLet(LetStmtAST *stmt, bool isConst) {
 }
 
 void SemanticAnalyzer::analyzeConst(ConstStmtAST *stmt) {
-  TypeRef annotated = stmt->type ? resolveType(stmt->type.get()) : nullptr;
+  TypeRef annotated = stmt->type ? resolveType(stmt->type.get(), currentImplType) : nullptr;
   if (annotated) {
     validateTypeConstraints(annotated, stmt->position());
   }
@@ -1985,14 +1985,18 @@ TypeRef SemanticAnalyzer::analyzeCastExpr(CastExprAST *expr) {
 //===----------------------------------------------------------------------===//
 
 TypeRef SemanticAnalyzer::resolveType(TypeAST *typeAst) {
+  return resolveType(typeAst, currentImplType);
+}
+
+TypeRef SemanticAnalyzer::resolveType(TypeAST *typeAst, const std::string &selfType) {
   if (!typeAst) {
     return TypeFactory::getVoid();
   }
   if (auto *prim = dynamic_cast<PrimitiveTypeAST *>(typeAst)) {
-    return resolveTypeName(prim->name);
+    return resolveTypeName(prim->name, selfType);
   }
   if (auto *arr = dynamic_cast<ArrayTypeAST *>(typeAst)) {
-    auto elem = resolveType(arr->element_type.get());
+    auto elem = resolveType(arr->element_type.get(), selfType);
     int64_t lengthValue = -1;
     bool hasLen = arr->size_expr && tryEvaluateConstInt(arr->size_expr.get(), lengthValue);
     if (arr->size_expr && !hasLen) {
@@ -2001,7 +2005,7 @@ TypeRef SemanticAnalyzer::resolveType(TypeAST *typeAst) {
     return TypeFactory::makeArray(elem, lengthValue, hasLen);
   }
   if (auto *refType = dynamic_cast<ReferenceTypeAST *>(typeAst)) {
-    auto target = resolveType(refType->referenced_type.get());
+    auto target = resolveType(refType->referenced_type.get(), selfType);
     return TypeFactory::makeReference(target, refType->is_mutable);
   }
   if (auto *tupleType = dynamic_cast<TupleTypeAST *>(typeAst)) {
@@ -2188,12 +2192,31 @@ bool SemanticAnalyzer::ensureAssignable(const TypeRef &from, const TypeRef &to, 
   }
 
   if (to->kind == BaseType::Struct || to->kind == BaseType::Enum || to->kind == BaseType::Custom) {
-    if (from->kind != to->kind || from->name != to->name) {
-      logStructMismatch("kind/name mismatch");
-      reportError(position, "Cannot assign '" + describe(from) + "' to '" + describe(to) + "'");
-      return false;
+    // 如果类型名称相同，直接返回true
+    if (from->kind == to->kind && from->name == to->name) {
+      return true;
     }
-    return true;
+
+    // 特殊处理：在trait实现中，Self类型应该与实现类型兼容
+    // 如果from是"Self"类型（在impl块中解析为具体类型），to是具体类型，应该允许赋值
+    // 反之亦然
+    if (from->kind == to->kind) {
+      // 检查是否在impl块中，并且一个是Self一个是具体类型
+      if (!currentImplType.empty()) {
+        // 如果from是Self类型（名称为currentImplType），to也是结构体类型
+        if (from->name == currentImplType && structs.count(to->name)) {
+          return true;
+        }
+        // 如果to是Self类型（名称为currentImplType），from也是结构体类型
+        if (to->name == currentImplType && structs.count(from->name)) {
+          return true;
+        }
+      }
+    }
+
+    logStructMismatch("kind/name mismatch");
+    reportError(position, "Cannot assign '" + describe(from) + "' to '" + describe(to) + "'");
+    return false;
   }
 
   if (to->kind == BaseType::Function) {

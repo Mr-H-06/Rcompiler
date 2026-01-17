@@ -280,6 +280,8 @@ public:
   // 辅助
   TypeRef resolveType(TypeAST *typeAst);
 
+  TypeRef resolveType(TypeAST *typeAst, const std::string &selfType);
+
   TypeRef resolveTypeName(const std::string &name, const std::string &selfType = "");
 
   void reportError(size_t position, const std::string &msg);
