@@ -215,7 +215,7 @@ namespace IRGen {
     return 0;
   }
 
-  constexpr size_t kHeapSlotsThreshold = 65536; // allocate large aggregates on heap to avoid stack overflow
+  constexpr size_t kHeapSlotsThreshold = 4096;
 
   TypeRef stripRef(const TypeRef &t) {
     if (!g_analyzer) return t;
