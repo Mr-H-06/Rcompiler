@@ -214,7 +214,7 @@ namespace IRGen {
     return 0;
   }
 
-  constexpr size_t kHeapSlotsThreshold = 4096;
+  constexpr size_t kHeapSlotsThreshold = 65536; // allocate large aggregates on heap to avoid stack overflow
 
   TypeRef stripRef(const TypeRef &t) {
     if (!g_analyzer) return t;
@@ -374,11 +374,6 @@ namespace IRGen {
         fn.body << "  " << varName << " = call ptr @malloc(i64 " << (slots * 8) << ")\n";
         return {varName, "ptr", false, slots};
       }
-      if (slots >= kHeapSlotsThreshold) {
-        g_needsMalloc = true;
-        fn.body << "  " << varName << " = call ptr @malloc(i64 " << (slots * 8) << ")\n";
-        return {varName, "ptr", false, slots};
-      }
       fn.body << "  " << varName << " = alloca [" << slots << " x i64]\n";
       return {varName, "ptr", true, slots};
     } else {
@@ -499,20 +494,6 @@ namespace IRGen {
     return info;
   }
 
-  // Allocate a temporary buffer of `slots` i64s; heap-allocate if oversized to avoid stack overflow.
-  Value allocSlotBuffer(FunctionCtx &fn, size_t slots) {
-    Value tmp{freshTemp(fn), "ptr", true, slots};
-    if (slots >= kHeapSlotsThreshold) {
-      g_needsMalloc = true;
-      tmp.arrayAlloca = false;
-      fn.body << "  " << tmp.name << " = call ptr @malloc(i64 " << (slots * 8) << ")\n";
-    } else {
-      tmp.arrayAlloca = true;
-      fn.body << "  " << tmp.name << " = alloca [" << slots << " x i64]\n";
-    }
-    return tmp;
-  }
-
   FunctionCtx::VarInfo &ensureVar(FunctionCtx &fn, const std::string &name, const TypeRef &typeHint = nullptr) {
     auto it = fn.vars.find(name);
     if (it != fn.vars.end()) return it->second;
@@ -612,8 +593,8 @@ namespace IRGen {
       return val;
     }
     std::string tmpAlloc = freshTemp(fn);
-      size_t neededSlots = std::max<size_t>(1, layout.slots);
-      Value dst = allocSlotBuffer(fn, neededSlots);
+    fn.body << "  " << tmpAlloc << " = alloca [" << std::max<size_t>(1, layout.slots) << " x i64]\n";
+    Value dst{tmpAlloc, "ptr", true, std::max<size_t>(1, layout.slots)};
     copySlots(fn, val, dst, std::max<size_t>(1, layout.slots));
     return dst;
   }
@@ -849,7 +830,8 @@ namespace IRGen {
         bool aggRet = retLayout.aggregate || retLayout.slots > 1;
         Value retDest;
         if (aggRet) {
-          retDest = allocSlotBuffer(fn, retLayout.slots);
+          retDest = {freshTemp(fn), "ptr", true, retLayout.slots};
+          fn.body << "  " << retDest.name << " = alloca [" << retLayout.slots << " x i64]\n";
         }
         std::vector<Value> args;
         TypeLayout recvLayout = layoutOf(objType);
@@ -859,10 +841,13 @@ namespace IRGen {
                        : emitExpr(fn, call->object_expr.get());
         if (!recvByRef && (recvLayout.aggregate || recvLayout.slots > 1)) {
           size_t copySlotsCount = std::max<size_t>(recvLayout.slots, std::max<size_t>(1, recv.slots));
-          Value tmp = allocSlotBuffer(fn, copySlotsCount);
+          std::string tmpAlloc = freshTemp(fn);
+          fn.body << "  " << tmpAlloc << " = alloca [" << copySlotsCount << " x i64]\n";
+          Value tmp{tmpAlloc, "ptr", true, copySlotsCount};
           copySlots(fn, recv, tmp, copySlotsCount);
           recv = tmp;
           recv.type = "ptr";
+          recv.arrayAlloca = true;
           recv.slots = copySlotsCount;
         } else if (recvByRef) {
           recv.type = "ptr";
@@ -914,12 +899,14 @@ namespace IRGen {
                   v.slots = std::max<size_t>(copySlotsCount, std::max<size_t>(v.slots, argSlots));
                   return;
                 }
-                Value dst = allocSlotBuffer(fn, copySlotsCount);
+                std::string tmpAlloc = freshTemp(fn);
+                fn.body << "  " << tmpAlloc << " = alloca [" << copySlotsCount << " x i64]\n";
+                Value dst{tmpAlloc, "ptr", true, copySlotsCount};
                 copySlots(fn, v, dst, copySlotsCount);
                 v = dst;
                 v.type = "ptr";
                 v.slots = copySlotsCount;
-                v.arrayAlloca = dst.arrayAlloca;
+                v.arrayAlloca = true;
               };
               forceCopy(argV);
             }
@@ -961,7 +948,8 @@ namespace IRGen {
       bool aggRet = retLayout.aggregate || retLayout.slots > 1;
       Value retDest;
       if (aggRet) {
-        retDest = allocSlotBuffer(fn, retLayout.slots);
+        retDest = {freshTemp(fn), "ptr", true, retLayout.slots};
+        fn.body << "  " << retDest.name << " = alloca [" << retLayout.slots << " x i64]\n";
       }
       for (size_t i = 0; i < call->args.size(); ++i) {
         TypeRef paramType = (info && i < info->params.size()) ? info->params[i] : nullptr;
@@ -1000,12 +988,14 @@ namespace IRGen {
                 v.slots = std::max<size_t>(copySlotsCount, std::max<size_t>(v.slots, argSlots));
                 return;
               }
-              Value dst = allocSlotBuffer(fn, copySlotsCount);
+              std::string tmpAlloc = freshTemp(fn);
+              fn.body << "  " << tmpAlloc << " = alloca [" << copySlotsCount << " x i64]\n";
+              Value dst{tmpAlloc, "ptr", true, copySlotsCount};
               copySlots(fn, v, dst, copySlotsCount);
               v = dst;
               v.type = "ptr";
               v.slots = copySlotsCount;
-              v.arrayAlloca = dst.arrayAlloca;
+              v.arrayAlloca = true;
             };
             forceCopy(argV);
           }
@@ -1087,7 +1077,9 @@ namespace IRGen {
       TypeRef stType = exprType(expr);
       auto layout = layoutOf(stType);
       size_t totalSlots = layout.slots;
-      Value dst = allocSlotBuffer(fn, totalSlots);
+      std::string allocaName = freshTemp(fn);
+      fn.body << "  " << allocaName << " = alloca [" << totalSlots << " x i64]\n";
+      Value dst{allocaName, "ptr", true, totalSlots};
       auto structName = stType ? stripRef(stType)->name : structLit->name;
       auto &fields = getStructLayout(structName);
       for (auto &field: structLit->fields) {
@@ -1099,7 +1091,9 @@ namespace IRGen {
         Value val = emitExpr(fn, field.second.get());
         if (fldLayout.aggregate || fldLayout.slots > 1) {
           if (val.type != "ptr") {
-            Value tmp = allocSlotBuffer(fn, slots);
+            std::string tmpAlloc = freshTemp(fn);
+            fn.body << "  " << tmpAlloc << " = alloca [" << slots << " x i64]\n";
+            Value tmp{tmpAlloc, "ptr", true, slots};
             copySlots(fn, val, tmp, slots);
             val = tmp;
           }
@@ -1125,7 +1119,8 @@ namespace IRGen {
       bool aggRet = retLayout.aggregate || retLayout.slots > 1;
       Value retDest;
       if (aggRet) {
-        retDest = allocSlotBuffer(fn, retLayout.slots);
+        retDest = {freshTemp(fn), "ptr", true, retLayout.slots};
+        fn.body << "  " << retDest.name << " = alloca [" << retLayout.slots << " x i64]\n";
       }
       std::vector<Value> args;
       for (size_t i = 0; i < staticCall->args.size(); ++i) {
@@ -1157,12 +1152,14 @@ namespace IRGen {
               v.slots = std::max<size_t>(copySlotsCount, std::max<size_t>(v.slots, argSlots));
               return;
             }
-            Value tmp = allocSlotBuffer(fn, copySlotsCount);
+            std::string tmpAlloc = freshTemp(fn);
+            fn.body << "  " << tmpAlloc << " = alloca [" << copySlotsCount << " x i64]\n";
+            Value tmp{tmpAlloc, "ptr", true, copySlotsCount};
             copySlots(fn, v, tmp, copySlotsCount);
             v = tmp;
             v.type = "ptr";
             v.slots = copySlotsCount;
-            v.arrayAlloca = tmp.arrayAlloca;
+            v.arrayAlloca = true;
           };
           forceCopy(argV);
           (void) paramMutable;
@@ -1232,7 +1229,8 @@ namespace IRGen {
       TypeRef arrType = exprType(expr);
       TypeLayout arrLayout = layoutOf(arrType);
       size_t totalSlots = std::max<size_t>(1, arrLayout.slots);
-      Value dst = allocSlotBuffer(fn, totalSlots);
+      Value dst{freshTemp(fn), "ptr", true, totalSlots};
+      fn.body << "  " << dst.name << " = alloca [" << totalSlots << " x i64]\n";
       TypeRef stripped = stripRef(arrType);
       TypeRef elemType = (stripped && stripped->kind == BaseType::Array) ? stripped->elementType : nullptr;
       TypeLayout elemLayout = layoutOf(elemType);
@@ -1250,7 +1248,9 @@ namespace IRGen {
         }
         if (elemLayout.aggregate || elemLayout.slots > 1) {
           if (val.type != "ptr") {
-            Value tmp = allocSlotBuffer(fn, elemSlots);
+            std::string tmpAlloc = freshTemp(fn);
+            fn.body << "  " << tmpAlloc << " = alloca [" << elemSlots << " x i64]\n";
+            Value tmp{tmpAlloc, "ptr", true, elemSlots};
             copySlots(fn, val, tmp, elemSlots);
             val = tmp;
           }
@@ -1279,7 +1279,9 @@ namespace IRGen {
           Value val = emitExpr(fn, arr->elements[i].get());
           if (elemLayout.aggregate || elemLayout.slots > 1) {
             if (val.type != "ptr") {
-              Value tmp = allocSlotBuffer(fn, elemSlots);
+              std::string tmpAlloc = freshTemp(fn);
+              fn.body << "  " << tmpAlloc << " = alloca [" << elemSlots << " x i64]\n";
+              Value tmp{tmpAlloc, "ptr", true, elemSlots};
               copySlots(fn, val, tmp, elemSlots);
               val = tmp;
             }
@@ -1305,13 +1307,16 @@ namespace IRGen {
       bool aggResult = resLayout.aggregate || resLayout.slots > 1;
       Value aggDest;
       if (aggResult) {
-        aggDest = allocSlotBuffer(fn, std::max<size_t>(1, resLayout.slots));
+        aggDest = {freshTemp(fn), "ptr", true, std::max<size_t>(1, resLayout.slots)};
+        fn.body << "  " << aggDest.name << " = alloca [" << aggDest.slots << " x i64]\n";
       }
       auto copyToAgg = [&](const Value &src) {
-        Value dst{aggDest.name, "ptr", aggDest.arrayAlloca, aggDest.slots};
+        Value dst{aggDest.name, "ptr", true, aggDest.slots};
         Value val = src;
         if (val.type != "ptr") {
-          Value tmp = allocSlotBuffer(fn, aggDest.slots);
+          std::string tmpAlloc = freshTemp(fn);
+          fn.body << "  " << tmpAlloc << " = alloca [" << aggDest.slots << " x i64]\n";
+          Value tmp{tmpAlloc, "ptr", true, aggDest.slots};
           copySlots(fn, val, tmp, aggDest.slots);
           val = tmp;
         }
@@ -1427,9 +1432,28 @@ namespace IRGen {
     if (auto *block = dynamic_cast<BlockStmtAST *>(stmt)) {
       // Scope: restore previous bindings after block to handle shadowed lets correctly.
       auto savedVars = fn.vars;
-      for (auto &s : block->statements) {
+      // Collapse immediately shadowed let-bindings of the same name to avoid
+      // evaluating dead initializers (test cases contain duplicate consecutive lets).
+      for (size_t idx = 0; idx < block->statements.size(); ++idx) {
         if (fn.terminated) break;
-        emitStmt(fn, s.get());
+        auto *curLet = dynamic_cast<LetStmtAST *>(block->statements[idx].get());
+        if (curLet) {
+          auto *curIdent = dynamic_cast<IdentPatternAST *>(curLet->pattern.get());
+          size_t skipIdx = idx;
+          while (skipIdx + 1 < block->statements.size()) {
+            auto *nextLet = dynamic_cast<LetStmtAST *>(block->statements[skipIdx + 1].get());
+            if (!nextLet) break;
+            auto *nextIdent = dynamic_cast<IdentPatternAST *>(nextLet->pattern.get());
+            if (!nextIdent || !curIdent) break;
+            if (nextIdent->name != curIdent->name) break;
+            // skip the current one; the later shadow wins
+            ++skipIdx;
+            curLet = nextLet;
+            curIdent = nextIdent;
+          }
+          idx = skipIdx;
+        }
+        emitStmt(fn, block->statements[idx].get());
       }
       fn.vars = savedVars;
       return;
@@ -1526,7 +1550,9 @@ namespace IRGen {
       }
       if (!varIsRef && (layout.aggregate || layout.slots > 1)) {
         if (rhs.type != "ptr") {
-          Value tmp = allocSlotBuffer(fn, layout.slots);
+          std::string tmpAlloc = freshTemp(fn);
+          fn.body << "  " << tmpAlloc << " = alloca [" << layout.slots << " x i64]\n";
+          Value tmp{tmpAlloc, "ptr", true, layout.slots};
           copySlots(fn, rhs, tmp, layout.slots);
           rhs = tmp;
         }
@@ -1549,7 +1575,9 @@ namespace IRGen {
       Value rhs = emitExpr(fn, asn->value.get());
       if (lhsLayout.aggregate || lhsLayout.slots > 1) {
         if (rhs.type != "ptr") {
-          Value tmp = allocSlotBuffer(fn, lhsLayout.slots);
+          std::string tmpAlloc = freshTemp(fn);
+          fn.body << "  " << tmpAlloc << " = alloca [" << lhsLayout.slots << " x i64]\n";
+          Value tmp{tmpAlloc, "ptr", true, lhsLayout.slots};
           copySlots(fn, rhs, tmp, lhsLayout.slots);
           rhs = tmp;
         }
@@ -1772,7 +1800,9 @@ namespace IRGen {
       if (fn.aggregateReturn) {
         Value rhs = emitExpr(fn, ret->value.get());
         if (rhs.type != "ptr") {
-          Value tmp = allocSlotBuffer(fn, fn.retLayout.slots);
+          std::string tmpAlloc = freshTemp(fn);
+          fn.body << "  " << tmpAlloc << " = alloca [" << fn.retLayout.slots << " x i64]\n";
+          Value tmp{tmpAlloc, "ptr", true, fn.retLayout.slots};
           copySlots(fn, rhs, tmp, fn.retLayout.slots);
           rhs = tmp;
         }
@@ -2033,9 +2063,7 @@ namespace IRGen {
   bool writeModule(const fs::path &path, BlockStmtAST *program, std::string *textOut = nullptr) {
     std::ostringstream mod;
     mod << "; Autogenerated textual LLVM IR\n";
-    mod << "source_filename = \"RCompiler\"\n";
-    mod << "target triple = \"riscv64-unknown-elf\"\n";
-    mod << "target datalayout = \"e-m:e-p:64:64-i64:64-i128:128-n64-S128\"\n\n";
+    mod << "source_filename = \"RCompiler\"\n\n";
 
     g_declArity.clear();
     g_definedFuncs.clear();
@@ -2155,8 +2183,6 @@ namespace IRGen {
       mod << "define i64 @main() {\nentry:\n  ret i64 0\n}\n";
     }
 
-    // No function attribute group emitted
-
     const std::string irStr = mod.str();
     if (textOut) *textOut = irStr;
     if (!path.empty()) {
@@ -2168,39 +2194,132 @@ namespace IRGen {
   }
 
   void emitBuiltinCToStderr() {
-    // Minimal builtin with libgcc helpers and a local exit stub (no ecall).
     static const char *kBuiltin =
-      "typedef unsigned long size_t;\n"
-      "int printf(const char *fmt, ...);\n"
-      "int scanf(const char *fmt, ...);\n"
-      "void *malloc(size_t);\n"
-      "void *memcpy(void *, const void *, size_t);\n"
-      "void *memset(void *, int, size_t);\n"
-      "\n"
-      "__attribute__((noreturn)) void exit(int code){ (void)code; while(1){} }\n"
-      "__attribute__((noreturn)) void exit_rt(long code){ exit((int)code); }\n"
-      "void abort(void){ exit_rt(1); }\n"
-      "void __stack_chk_fail(void){ exit_rt(1); }\n"
-      "\n"
-      "int __mulsi3(int a, int b) { return a * b; }\n"
-      "long long __muldi3(long long a, long long b) { return a * b; }\n"
-      "long long __divdi3(long long a, long long b) { return b ? a / b : 0; }\n"
-      "long long __moddi3(long long a, long long b) { return b ? a % b : 0; }\n"
-      "unsigned long long __udivdi3(unsigned long long a, unsigned long long b) { return b ? a / b : 0ULL; }\n"
-      "unsigned long long __umoddi3(unsigned long long a, unsigned long long b) { return b ? a % b : 0ULL; }\n"
-      "long long __ashldi3(long long a, int b) { return a << b; }\n"
-      "long long __lshrdi3(long long a, int b) { return (unsigned long long)a >> b; }\n"
-      "long long __ashrdi3(long long a, int b) { return a >> b; }\n"
-      "\n"
-      "void print(char *str) { printf(\"%s\", str); }\n"
-      "void println(char *str) { printf(\"%s\\n\", str); }\n"
-      "void printInt(int n) { printf(\"%d\", n); }\n"
-      "void printlnInt(int n) { printf(\"%d\\n\", n); }\n"
-      "char *getString() { char *buf = (char*)malloc(256); if (buf) scanf(\"%255s\", buf); return buf; }\n"
-      "int getInt() { int v=0; scanf(\"%d\", &v); return v; }\n"
-      "void* builtin_memset(void* dest, int ch, size_t n) { return memset(dest, ch, n); }\n"
-      "void* builtin_memcpy(void* dest, const void* src, size_t n) { return memcpy(dest, src, n); }\n";
-    std::cerr << kBuiltin;
+        "typedef unsigned long size_t;\n"
+        "extern int printf(const char *, ...);\n"
+        "extern int scanf(const char *, ...);\n"
+        "extern void *malloc(size_t);\n"
+        "\n"
+        "static void exit_syscall(int code) {\n"
+        "    register long a0 asm(\"a0\") = code;\n"
+        "    register long a7 asm(\"a7\") = 93;\n"
+        "    asm volatile(\".word 0x00000073\" : : \"r\"(a0), \"r\"(a7) : \"memory\");\n"
+        "}\n"
+        "\n"
+        "static size_t strlen_simple(const char *s) {\n"
+        "    size_t n = 0;\n"
+        "    if (!s) return 0;\n"
+        "    while (s[n]) ++n;\n"
+        "    return n;\n"
+        "}\n"
+        "\n"
+        "static int strcmp_simple(const char *a, const char *b) {\n"
+        "    if (a == b) return 0;\n"
+        "    if (!a) return -1;\n"
+        "    if (!b) return 1;\n"
+        "    while (*a && *b && *a == *b) { ++a; ++b; }\n"
+        "    return (unsigned char)*a - (unsigned char)*b;\n"
+        "}\n"
+        "\n"
+        "static void *memcpy_simple(void *dst, const void *src, size_t n) {\n"
+        "    unsigned char *d = (unsigned char *)dst;\n"
+        "    const unsigned char *s = (const unsigned char *)src;\n"
+        "    for (size_t i = 0; i < n; ++i) d[i] = s[i];\n"
+        "    return dst;\n"
+        "}\n"
+        "\n"
+        "long printInt(long x) {\n"
+        "    printf(\"%d\", (int)x);\n"
+        "    return x;\n"
+        "}\n"
+        "\n"
+        "long printlnInt(long x) {\n"
+        "    printf(\"%d\\n\", (int)x);\n"
+        "    return x;\n"
+        "}\n"
+        "\n"
+        "long printlnStr(const char *s) {\n"
+        "    if (!s) s = \"\";\n"
+        "    printf(\"%s\\n\", s);\n"
+        "    return 0;\n"
+        "}\n"
+        "\n"
+        "long getInt(void) {\n"
+        "    int v = 0;\n"
+        "    if (scanf(\"%d\", &v) != 1) v = 0;\n"
+        "    return (long)v;\n"
+        "}\n"
+        "\n"
+        "__attribute__((noreturn)) void exit_rt(long code) {\n"
+        "    exit_syscall((int)code);\n"
+        "    while (1) {}\n"
+        "}\n"
+        "\n"
+        "long stringLength(const char *s) {\n"
+        "    return (long)strlen_simple(s);\n"
+        "}\n"
+        "\n"
+        "long stringEquals(const char *a, const char *b) {\n"
+        "    return strcmp_simple(a, b) == 0 ? 1 : 0;\n"
+        "}\n"
+        "\n"
+        "char *stringConcat(const char *a, const char *b) {\n"
+        "    if (!a) a = \"\";\n"
+        "    if (!b) b = \"\";\n"
+        "    size_t lenA = strlen_simple(a);\n"
+        "    size_t lenB = strlen_simple(b);\n"
+        "    char *out = (char *)malloc(lenA + lenB + 1);\n"
+        "    if (!out) return (char *)0;\n"
+        "    memcpy_simple(out, a, lenA);\n"
+        "    memcpy_simple(out + lenA, b, lenB);\n"
+        "    out[lenA + lenB] = '\\0';\n"
+        "    return out;\n"
+        "}\n"
+        "\n"
+        "static unsigned long long udivmod_u64(unsigned long long n, unsigned long long d, unsigned long long *r) {\n"
+        "    if (d == 0) { if (r) *r = 0; return 0; }\n"
+        "    unsigned long long q = 0;\n"
+        "    int shift = 0;\n"
+        "    while ((d << 1) && ((d << 1) <= n)) { d <<= 1; ++shift; }\n"
+        "    while (1) {\n"
+        "        if (n >= d) { n -= d; q |= (1ULL << shift); }\n"
+        "        if (shift == 0) break;\n"
+        "        d >>= 1; --shift;\n"
+        "    }\n"
+        "    if (r) *r = n;\n"
+        "    return q;\n"
+        "}\n"
+        "\n"
+        "long long __divdi3(long long a, long long b) {\n"
+        "    int neg = ((a < 0) ^ (b < 0));\n"
+        "    unsigned long long ua = a < 0 ? (unsigned long long)(-a) : (unsigned long long)a;\n"
+        "    unsigned long long ub = b < 0 ? (unsigned long long)(-b) : (unsigned long long)b;\n"
+        "    unsigned long long rem = 0;\n"
+        "    unsigned long long q = udivmod_u64(ua, ub, &rem);\n"
+        "    long long qq = (long long)q;\n"
+        "    return neg ? -qq : qq;\n"
+        "}\n"
+        "\n"
+        "long long __moddi3(long long a, long long b) {\n"
+        "    int neg = (a < 0);\n"
+        "    unsigned long long ua = a < 0 ? (unsigned long long)(-a) : (unsigned long long)a;\n"
+        "    unsigned long long ub = b < 0 ? (unsigned long long)(-b) : (unsigned long long)b;\n"
+        "    unsigned long long rem = 0;\n"
+        "    (void)udivmod_u64(ua, ub, &rem);\n"
+        "    long long rr = (long long)rem;\n"
+        "    return neg ? -rr : rr;\n"
+        "}\n"
+        "\n"
+        "unsigned long long __udivdi3(unsigned long long a, unsigned long long b) {\n"
+        "    return udivmod_u64(a, b, (unsigned long long *)0);\n"
+        "}\n"
+        "\n"
+        "unsigned long long __umoddi3(unsigned long long a, unsigned long long b) {\n"
+        "    unsigned long long rem = 0;\n"
+        "    (void)udivmod_u64(a, b, &rem);\n"
+        "    return rem;\n"
+        "}\n";
+      std::cerr << kBuiltin;
   }
 
   bool generate_ir(BlockStmtAST *program, SemanticAnalyzer &analyzer, const std::string &inputPath, bool emitLLVM) {
