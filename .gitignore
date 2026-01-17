@@ -3,6 +3,7 @@ test_case/**
 !test_case/**/*.rx
 !test_case/**/*.in
 !test_case/**/*.out
+!test_case/**/*.ll
 
 # 测试分类工具
 split_tests
