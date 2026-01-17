@@ -494,6 +494,20 @@ namespace IRGen {
     return info;
   }
 
+  // Allocate a temporary buffer of `slots` i64s; heap-allocate if oversized to avoid stack overflow.
+  Value allocSlotBuffer(FunctionCtx &fn, size_t slots) {
+    Value tmp{freshTemp(fn), "ptr", true, slots};
+    if (slots >= kHeapSlotsThreshold) {
+      g_needsMalloc = true;
+      tmp.arrayAlloca = false;
+      fn.body << "  " << tmp.name << " = call ptr @malloc(i64 " << (slots * 8) << ")\n";
+    } else {
+      tmp.arrayAlloca = true;
+      fn.body << "  " << tmp.name << " = alloca [" << slots << " x i64]\n";
+    }
+    return tmp;
+  }
+
   FunctionCtx::VarInfo &ensureVar(FunctionCtx &fn, const std::string &name, const TypeRef &typeHint = nullptr) {
     auto it = fn.vars.find(name);
     if (it != fn.vars.end()) return it->second;
@@ -1531,9 +1545,7 @@ namespace IRGen {
       }
       if (!varIsRef && (layout.aggregate || layout.slots > 1)) {
         if (rhs.type != "ptr") {
-          std::string tmpAlloc = freshTemp(fn);
-          fn.body << "  " << tmpAlloc << " = alloca [" << layout.slots << " x i64]\n";
-          Value tmp{tmpAlloc, "ptr", true, layout.slots};
+          Value tmp = allocSlotBuffer(fn, layout.slots);
           copySlots(fn, rhs, tmp, layout.slots);
           rhs = tmp;
         }
@@ -1556,9 +1568,7 @@ namespace IRGen {
       Value rhs = emitExpr(fn, asn->value.get());
       if (lhsLayout.aggregate || lhsLayout.slots > 1) {
         if (rhs.type != "ptr") {
-          std::string tmpAlloc = freshTemp(fn);
-          fn.body << "  " << tmpAlloc << " = alloca [" << lhsLayout.slots << " x i64]\n";
-          Value tmp{tmpAlloc, "ptr", true, lhsLayout.slots};
+          Value tmp = allocSlotBuffer(fn, lhsLayout.slots);
           copySlots(fn, rhs, tmp, lhsLayout.slots);
           rhs = tmp;
         }
