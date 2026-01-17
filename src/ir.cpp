@@ -1432,27 +1432,8 @@ namespace IRGen {
     if (auto *block = dynamic_cast<BlockStmtAST *>(stmt)) {
       // Scope: restore previous bindings after block to handle shadowed lets correctly.
       auto savedVars = fn.vars;
-      // Collapse immediately shadowed let-bindings of the same name to avoid
-      // evaluating dead initializers (test cases contain duplicate consecutive lets).
       for (size_t idx = 0; idx < block->statements.size(); ++idx) {
         if (fn.terminated) break;
-        auto *curLet = dynamic_cast<LetStmtAST *>(block->statements[idx].get());
-        if (curLet) {
-          auto *curIdent = dynamic_cast<IdentPatternAST *>(curLet->pattern.get());
-          size_t skipIdx = idx;
-          while (skipIdx + 1 < block->statements.size()) {
-            auto *nextLet = dynamic_cast<LetStmtAST *>(block->statements[skipIdx + 1].get());
-            if (!nextLet) break;
-            auto *nextIdent = dynamic_cast<IdentPatternAST *>(nextLet->pattern.get());
-            if (!nextIdent || !curIdent) break;
-            if (nextIdent->name != curIdent->name) break;
-            // skip the current one; the later shadow wins
-            ++skipIdx;
-            curLet = nextLet;
-            curIdent = nextIdent;
-          }
-          idx = skipIdx;
-        }
         emitStmt(fn, block->statements[idx].get());
       }
       fn.vars = savedVars;
@@ -2137,9 +2118,10 @@ namespace IRGen {
       mod << "body:\n";
       mod << "  %neg = icmp slt i64 %idx, 0\n";
       mod << "  %nz = select i1 %neg, i64 0, i64 %idx\n";
-      mod << "  %in = icmp slt i64 %nz, %len\n";
-      mod << "  %res = select i1 %in, i64 %nz, i64 0\n";
-      mod << "  ret i64 %res\n";
+      mod << "  %lenm1 = add i64 %len, -1\n";
+      mod << "  %hi = icmp sgt i64 %nz, %lenm1\n";
+      mod << "  %clamped = select i1 %hi, i64 %lenm1, i64 %nz\n";
+      mod << "  ret i64 %clamped\n";
       mod << "ret0:\n";
       mod << "  ret i64 0\n";
       mod << "}\n\n";
