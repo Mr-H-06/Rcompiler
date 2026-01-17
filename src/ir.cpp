@@ -798,6 +798,18 @@ namespace IRGen {
       auto elemLayout = layoutOf(elemType);
       size_t elemSlots = std::max<size_t>(1, elemLayout.slots);
       std::string idxName = index.name;
+      if (stripped && stripped->kind == BaseType::Array && stripped->hasArrayLength && stripped->arrayLength > 0) {
+        // Guard reads: if idx is out of [0, len), fall back to 0 to avoid OOB loads.
+        std::string nonneg = freshTemp(fn);
+        fn.body << "  " << nonneg << " = icmp sge i64 " << idxName << ", 0\n";
+        std::string lt = freshTemp(fn);
+        fn.body << "  " << lt << " = icmp slt i64 " << idxName << ", " << stripped->arrayLength << "\n";
+        std::string ok = freshTemp(fn);
+        fn.body << "  " << ok << " = and i1 " << nonneg << ", " << lt << "\n";
+        std::string safeIdx = freshTemp(fn);
+        fn.body << "  " << safeIdx << " = select i1 " << ok << ", i64 " << idxName << ", i64 0\n";
+        idxName = safeIdx;
+      }
       std::string scaled = freshTemp(fn);
       fn.body << "  " << scaled << " = mul i64 " << idxName << ", " << elemSlots << "\n";
       std::string elemPtr = basePtr.arrayAlloca ? freshTemp(fn) : freshTemp(fn);
