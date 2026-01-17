@@ -5,7 +5,6 @@ namespace IRGen {
   bool g_needsMemcpy = false;
   bool g_needsMalloc = false;
   bool g_needsIdxClamp = false;
-  constexpr const char *kDefaultFnAttr = "#0";
 
   // 全局变量定义
   std::unordered_map<std::string, size_t> g_declArity;
@@ -1845,8 +1844,7 @@ namespace IRGen {
       params << (usePtr ? "ptr" : "i64") << " %p" << paramIndex++;
     }
 
-    mod << "define " << (fn.returnsVoid ? "void" : "i64") << " @" << fn.name << "(" << params.str() << ") "
-      << kDefaultFnAttr << " {\n";
+    mod << "define " << (fn.returnsVoid ? "void" : "i64") << " @" << fn.name << "(" << params.str() << ") {\n";
     mod << "entry:\n";
     fn.currentLabel = "entry";
     fn.terminated = false;
@@ -1971,14 +1969,14 @@ namespace IRGen {
   // 生成字符串操作函数
   void emitStringFunctions(std::ostringstream &mod) {
     // 字符串长度函数
-    mod << "define i64 @stringLength(ptr %str) " << kDefaultFnAttr << " {\n";
+    mod << "define i64 @stringLength(ptr %str) {\n";
     mod << "entry:\n";
     mod << "  %len = call i64 @strlen(ptr %str)\n";
     mod << "  ret i64 %len\n";
     mod << "}\n\n";
 
     // 字符串比较函数
-    mod << "define i1 @stringEquals(ptr %str1, ptr %str2) " << kDefaultFnAttr << " {\n";
+    mod << "define i1 @stringEquals(ptr %str1, ptr %str2) {\n";
     mod << "entry:\n";
     mod << "  %cmp = call i32 @strcmp(ptr %str1, ptr %str2)\n";
     mod << "  %eq = icmp eq i32 %cmp, 0\n";
@@ -1986,7 +1984,7 @@ namespace IRGen {
     mod << "}\n\n";
 
     // 字符串连接函数
-    mod << "define ptr @stringConcat(ptr %str1, ptr %str2) " << kDefaultFnAttr << " {\n";
+    mod << "define ptr @stringConcat(ptr %str1, ptr %str2) {\n";
     mod << "entry:\n";
     mod << "  %len1 = call i64 @strlen(ptr %str1)\n";
     mod << "  %len2 = call i64 @strlen(ptr %str2)\n";
@@ -2115,7 +2113,7 @@ namespace IRGen {
     }
 
     if (g_needsIdxClamp) {
-      mod << "define i64 @__idx_clamp(i64 %idx, i64 %len) " << kDefaultFnAttr << " {\n";
+      mod << "define i64 @__idx_clamp(i64 %idx, i64 %len) {\n";
       mod << "entry:\n";
       mod << "  %lenpos = icmp sgt i64 %len, 0\n";
       mod << "  br i1 %lenpos, label %body, label %ret0\n";
@@ -2168,8 +2166,7 @@ namespace IRGen {
       mod << "define i64 @main() " << kDefaultFnAttr << " {\nentry:\n  ret i64 0\n}\n";
     }
 
-    // Enable linker/assembler relaxations so long branches are legalized on RISC-V
-    mod << "attributes #0 = { minsize optsize \"target-features\"=\"+relax\" }\n";
+    // No function attribute group emitted
 
     const std::string irStr = mod.str();
     if (textOut) *textOut = irStr;
