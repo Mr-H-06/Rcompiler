@@ -2182,7 +2182,7 @@ namespace IRGen {
   }
 
   void emitBuiltinCToStderr() {
-    // Minimal builtin with libgcc helpers and a real exit syscall.
+    // Minimal builtin with libgcc helpers and a local exit stub (no ecall).
     static const char *kBuiltin =
       "typedef unsigned long size_t;\n"
       "int printf(const char *fmt, ...);\n"
@@ -2191,8 +2191,8 @@ namespace IRGen {
       "void *memcpy(void *, const void *, size_t);\n"
       "void *memset(void *, int, size_t);\n"
       "\n"
-      "void exit(int);\n"
-      "__attribute__((noreturn)) void exit_rt(long code){ exit((int)code); while(1){} }\n"
+      "__attribute__((noreturn)) void exit(int code){ (void)code; while(1){} }\n"
+      "__attribute__((noreturn)) void exit_rt(long code){ exit((int)code); }\n"
       "void abort(void){ exit_rt(1); }\n"
       "void __stack_chk_fail(void){ exit_rt(1); }\n"
       "\n"
