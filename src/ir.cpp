@@ -4,7 +4,6 @@ namespace IRGen {
   bool g_needsMemset = false;
   bool g_needsMemcpy = false;
   bool g_needsMalloc = false;
-  bool g_needsIdxClamp = false;
 
   // 全局变量定义
   std::unordered_map<std::string, size_t> g_declArity;
@@ -233,16 +232,6 @@ namespace IRGen {
   TypeRef stripRef(const TypeRef &t) {
     if (!g_analyzer) return t;
     return g_analyzer->stripReference(t);
-  }
-
-  // Clamp index into [0, len-1]; len<=0 yields 0. We fall back to 0 when out of range
-  // instead of saturating to len-1 to relax the protection and match reference behavior.
-  std::string clampIndex(FunctionCtx &fn, const std::string &idxName, size_t lenElems) {
-    if (lenElems == 0) return idxName;
-    g_needsIdxClamp = true;
-    std::string tmp = freshTemp(fn);
-    fn.body << "  " << tmp << " = call i64 @__idx_clamp(i64 " << idxName << ", i64 " << lenElems << ")\n";
-    return tmp;
   }
 
   std::unordered_map<std::string, std::vector<std::tuple<std::string, size_t, size_t, TypeRef> > > g_structLayouts;
@@ -808,12 +797,7 @@ namespace IRGen {
       }
       auto elemLayout = layoutOf(elemType);
       size_t elemSlots = std::max<size_t>(1, elemLayout.slots);
-      size_t lenElems = (stripped && stripped->kind == BaseType::Array && stripped->hasArrayLength && stripped->arrayLength > 0)
-                        ? static_cast<size_t>(stripped->arrayLength) : 0;
       std::string idxName = index.name;
-      if (lenElems > 0) {
-        idxName = clampIndex(fn, idxName, lenElems);
-      }
       std::string scaled = freshTemp(fn);
       fn.body << "  " << scaled << " = mul i64 " << idxName << ", " << elemSlots << "\n";
       std::string elemPtr = basePtr.arrayAlloca ? freshTemp(fn) : freshTemp(fn);
@@ -1629,12 +1613,7 @@ namespace IRGen {
         TypeRef elemType = (stripped && stripped->kind == BaseType::Array) ? stripped->elementType : nullptr;
         auto elemLayout = layoutOf(elemType);
         size_t elemSlots = std::max<size_t>(1, elemLayout.slots);
-        size_t lenElems = (stripped && stripped->kind == BaseType::Array && stripped->hasArrayLength && stripped->arrayLength > 0)
-                          ? static_cast<size_t>(stripped->arrayLength) : 0;
         std::string idxName = index.name;
-        if (lenElems > 0) {
-          idxName = clampIndex(fn, idxName, lenElems);
-        }
         std::string scaled = freshTemp(fn);
         fn.body << "  " << scaled << " = mul i64 " << idxName << ", " << elemSlots << "\n";
         std::string elemPtr = basePtr.arrayAlloca ? freshTemp(fn) : freshTemp(fn);
@@ -2122,23 +2101,6 @@ namespace IRGen {
       emitStringFunctions(mod);
     }
 
-    if (g_needsIdxClamp) {
-      mod << "define i64 @__idx_clamp(i64 %idx, i64 %len) {\n";
-      mod << "entry:\n";
-      mod << "  %lenpos = icmp sgt i64 %len, 0\n";
-      mod << "  br i1 %lenpos, label %body, label %ret0\n";
-      mod << "body:\n";
-      mod << "  %nonneg = icmp sge i64 %idx, 0\n";
-      mod << "  %lt = icmp slt i64 %idx, %len\n";
-      mod << "  %ok = and i1 %nonneg, %lt\n";
-      mod << "  %clamped = select i1 %ok, i64 %idx, i64 0\n";
-      mod << "  ret i64 %clamped\n";
-      mod << "ret0:\n";
-      mod << "  ret i64 0\n";
-      mod << "}\n\n";
-      g_definedFuncs.insert("__idx_clamp");
-    }
-
     // emit builtin declarations; implementations provided via builtin.c on stderr
     mod << "declare i32 @printf(ptr, ...)\n";
     mod << "declare i32 @scanf(ptr, ...)\n";
@@ -2322,7 +2284,6 @@ namespace IRGen {
     g_needsMemset = false;
     g_needsMemcpy = false;
     g_needsMalloc = false;
-    g_needsIdxClamp = false;
     if (!emitLLVM) return true;
     if (!program) {
       throw std::runtime_error("IR generation failed: null program");
