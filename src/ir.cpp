@@ -2158,12 +2158,12 @@ namespace IRGen {
     // emit stubs for any referenced but undefined functions to satisfy llc/clang
     for (auto &[name, arity]: g_declArity) {
       if (g_definedFuncs.count(name)) continue;
-      mod << "define i64 @" << name << "(...) " << kDefaultFnAttr << " {\nentry:\n  ret i64 0\n}\n\n";
+      mod << "define i64 @" << name << "(...) {\nentry:\n  ret i64 0\n}\n\n";
     }
 
     // If no function emitted, add a dummy main
     if (mod.str().find("define") == std::string::npos) {
-      mod << "define i64 @main() " << kDefaultFnAttr << " {\nentry:\n  ret i64 0\n}\n";
+      mod << "define i64 @main() {\nentry:\n  ret i64 0\n}\n";
     }
 
     // No function attribute group emitted
