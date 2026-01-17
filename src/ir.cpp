@@ -235,7 +235,7 @@ namespace IRGen {
     return g_analyzer->stripReference(t);
   }
 
-  // Clamp index into [0, 2*len-1]; len<=0 yields original.
+  // Clamp index into [0, len+1]; len<=0 yields original.
   std::string clampIndex(FunctionCtx &fn, const std::string &idxName, size_t lenElems) {
     if (lenElems == 0) return idxName;
     g_needsIdxClamp = true;
@@ -2135,10 +2135,9 @@ namespace IRGen {
       mod << "body:\n";
       mod << "  %neg = icmp slt i64 %idx, 0\n";
       mod << "  %nz = select i1 %neg, i64 0, i64 %idx\n";
-      mod << "  %double = mul i64 %len, 2\n";
-      mod << "  %hiBound = add i64 %double, -1\n";
-      mod << "  %hi = icmp sgt i64 %nz, %hiBound\n";
-      mod << "  %clamped = select i1 %hi, i64 %hiBound, i64 %nz\n";
+      mod << "  %lenp1 = add i64 %len, 1\n";
+      mod << "  %hi = icmp sgt i64 %nz, %lenp1\n";
+      mod << "  %clamped = select i1 %hi, i64 %lenp1, i64 %nz\n";
       mod << "  ret i64 %clamped\n";
       mod << "ret0:\n";
       mod << "  ret i64 %idx\n";
