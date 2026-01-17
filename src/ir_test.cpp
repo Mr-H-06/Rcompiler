@@ -93,7 +93,7 @@ std::string read_file_content(const fs::path& file_path) {
 }
 
 // Run IR test: compile -> llc -> clang -> run and compare output.
-bool run_ir_test(const fs::path& test_file, const fs::path& compiler_path) {
+bool run_ir_test(const fs::path& test_file, const fs::path& compiler_path, const std::string &ref_builtin) {
     std::string base_name = test_file.stem().string();
 
     fs::path in_file = test_file.parent_path() / (base_name + ".in");
@@ -141,6 +141,28 @@ bool run_ir_test(const fs::path& test_file, const fs::path& compiler_path) {
         builtin_text = compile_out.substr(pos);
     }
 
+    bool used_compiler_builtin = !builtin_text.empty();
+    bool used_ref_builtin = false;
+    bool used_stub_builtin = false;
+
+    // For host-side testing we override the module triple/datalayout to x86_64
+    // so llc/clang assemble locally produced code instead of riscv.
+#if defined(_WIN32)
+    const std::string host_triple = "x86_64-pc-windows-msvc";
+    const std::string host_datalayout = "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128";
+#else
+    const std::string host_triple = "x86_64-pc-linux-gnu";
+    const std::string host_datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128";
+#endif
+    auto replace_once = [](std::string &s, const std::string &from, const std::string &to) {
+        size_t p = s.find(from);
+        if (p != std::string::npos) {
+            s.replace(p, from.size(), to);
+        }
+    };
+    replace_once(ir_text, "target triple = \"riscv64-unknown-elf\"", "target triple = \"" + host_triple + "\"");
+    replace_once(ir_text, "target datalayout = \"e-m:e-p:64:64-i64:64-i128:128-n64-S128\"", "target datalayout = \"" + host_datalayout + "\"");
+
     // For host testing, replace inline-asm RISC-V builtins with portable stubs to satisfy clang on x86
     const char *kHostBuiltin =
         "#include <stdio.h>\n"
@@ -150,9 +172,30 @@ bool run_ir_test(const fs::path& test_file, const fs::path& compiler_path) {
         "long printlnStr(const char *s){printf(\"%s\\n\", s ? s : \"\");return 0;}\n"
         "long getInt(void){long v=0;if(scanf(\"%ld\", &v)!=1)v=0;return v;}\n"
         "__attribute__((noreturn)) void exit_rt(long code){exit((int)code);}\n";
-    // If builtin_text is empty or clearly RISC-V specific (contains "asm(\".word"), use host stubs
-    if (builtin_text.empty() || builtin_text.find(".word 0x00000073") != std::string::npos) {
+    // Prefer compiler-emitted builtin when available; otherwise, use reference IR-1 builtin if present.
+    // For host runs, swap out RISC-V inline asm with a portable stub to keep clang happy.
+    const std::string riscv_marker = ".word 0x00000073";
+    if (builtin_text.empty() && !ref_builtin.empty()) {
+        builtin_text = ref_builtin;
+        used_ref_builtin = true;
+    }
+
+    if (!builtin_text.empty() && builtin_text.find(riscv_marker) != std::string::npos) {
+        if (!ref_builtin.empty()) {
+            builtin_text = ref_builtin;
+            used_ref_builtin = true;
+            used_compiler_builtin = false;
+        } else {
+            builtin_text = kHostBuiltin;
+            used_stub_builtin = true;
+            used_compiler_builtin = false;
+        }
+    }
+
+    if (builtin_text.empty()) {
         builtin_text = kHostBuiltin;
+        used_stub_builtin = true;
+        used_compiler_builtin = false;
     }
 
     {
@@ -170,9 +213,18 @@ bool run_ir_test(const fs::path& test_file, const fs::path& compiler_path) {
         bf << builtin_text;
     }
 
+    std::cout << "  Builtin source: "
+              << (used_compiler_builtin ? "compiler output" : used_ref_builtin ? "IR-1/builtin" : "host stub")
+              << std::endl;
+
     // 2. Compile LLVM IR to executable
     std::cout << "  Compiling IR to executable..." << std::endl;
-    std::string llc_cmd = std::string("llc ") + quote(ir_file);
+    std::string llc_cmd;
+#ifdef _WIN32
+    llc_cmd = std::string("llc -mtriple=x86_64-pc-windows-msvc -o ") + quote(asm_file) + " " + quote(ir_file);
+#else
+    llc_cmd = std::string("llc -mtriple=x86_64-pc-linux-gnu -o ") + quote(asm_file) + " " + quote(ir_file);
+#endif
     auto [llc_ret, llc_err] = execute_command(llc_cmd);
 
     if (llc_ret != 0) {
@@ -306,6 +358,19 @@ int main(int argc, char* argv[]) {
         collect_tests(root, test_files);
     }
 
+    // Load reference builtin from IR-1/builtin if present (used when compiler emits RISC-V asm builtin)
+    std::string ref_builtin;
+    for (const auto &root : root_candidates) {
+        fs::path candidate = root.parent_path() / "builtin" / "builtin.c";
+        std::error_code ec;
+        if (!fs::exists(candidate, ec)) continue;
+        ref_builtin = read_file_content(candidate);
+        if (!ref_builtin.empty()) {
+            std::cout << "Loaded reference builtin: " << candidate << std::endl;
+            break;
+        }
+    }
+
     std::sort(test_files.begin(), test_files.end(), [](const fs::path &a, const fs::path &b) {
         return a.string() < b.string();
     });
@@ -314,7 +379,7 @@ int main(int argc, char* argv[]) {
     }), test_files.end());
 
     if (test_files.empty()) {
-        std::cout << "No .rx test files found under test_case/semantic-2 (checked relative to cwd and exe dir)" << std::endl;
+        std::cout << "No .rx test files found under test_case/IR-1/src (checked relative to cwd and exe dir)" << std::endl;
         return 0;
     }
 
@@ -324,7 +389,7 @@ int main(int argc, char* argv[]) {
     for (const auto &test_file : test_files) {
         if (!should_run(test_file)) continue;
         try {
-            if (!run_ir_test(test_file, compiler_path)) {
+            if (!run_ir_test(test_file, compiler_path, ref_builtin)) {
                 all_passed = false;
             }
         } catch (const std::exception &e) {
