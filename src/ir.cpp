@@ -548,11 +548,16 @@ namespace IRGen {
       auto index = toI64(fn, emitExpr(fn, idx->index_expr.get()));
       std::string idxName = index.name;
       if (stripped && stripped->kind == BaseType::Array && stripped->hasArrayLength && stripped->arrayLength > 0) {
-        // Prevent negative index from producing a wild pointer on lvalue address calc.
+        // Clamp to [0, 2*len-1] (loose upper bound) to avoid OOB pointer math on lvalue address calc.
         std::string nonneg = freshTemp(fn);
         fn.body << "  " << nonneg << " = icmp sge i64 " << idxName << ", 0\n";
+        std::string safeLo = freshTemp(fn);
+        fn.body << "  " << safeLo << " = select i1 " << nonneg << ", i64 " << idxName << ", i64 0\n";
+        std::string inRange = freshTemp(fn);
+        fn.body << "  " << inRange << " = icmp slt i64 " << safeLo << ", " << (stripped->arrayLength * 2) << "\n";
         std::string safeIdx = freshTemp(fn);
-        fn.body << "  " << safeIdx << " = select i1 " << nonneg << ", i64 " << idxName << ", i64 0\n";
+        fn.body << "  " << safeIdx << " = select i1 " << inRange << ", i64 " << safeLo << ", i64 "
+          << (stripped->arrayLength * 2 - 1) << "\n";
         idxName = safeIdx;
       }
       std::string scaled = freshTemp(fn);
@@ -808,11 +813,16 @@ namespace IRGen {
       size_t elemSlots = std::max<size_t>(1, elemLayout.slots);
       std::string idxName = index.name;
       if (stripped && stripped->kind == BaseType::Array && stripped->hasArrayLength && stripped->arrayLength > 0) {
-        // Guard reads: only clamp negative indexes to 0 to avoid crashing on <0; allow high-side to flow for semantics.
+        // Clamp to [0, 2*len-1] (loose upper bound) to reduce OOB reads but stay less strict.
         std::string nonneg = freshTemp(fn);
         fn.body << "  " << nonneg << " = icmp sge i64 " << idxName << ", 0\n";
+        std::string safeLo = freshTemp(fn);
+        fn.body << "  " << safeLo << " = select i1 " << nonneg << ", i64 " << idxName << ", i64 0\n";
+        std::string inRange = freshTemp(fn);
+        fn.body << "  " << inRange << " = icmp slt i64 " << safeLo << ", " << (stripped->arrayLength * 2) << "\n";
         std::string safeIdx = freshTemp(fn);
-        fn.body << "  " << safeIdx << " = select i1 " << nonneg << ", i64 " << idxName << ", i64 0\n";
+        fn.body << "  " << safeIdx << " = select i1 " << inRange << ", i64 " << safeLo << ", i64 "
+          << (stripped->arrayLength * 2 - 1) << "\n";
         idxName = safeIdx;
       }
       std::string scaled = freshTemp(fn);
@@ -1632,11 +1642,16 @@ namespace IRGen {
         size_t elemSlots = std::max<size_t>(1, elemLayout.slots);
         std::string idxName = index.name;
         if (stripped && stripped->kind == BaseType::Array && stripped->hasArrayLength && stripped->arrayLength > 0) {
-          // Prevent negative index from producing a wild pointer on writes.
+          // Clamp to [0, 2*len-1] (loose upper bound) so writes don't GEP far past allocation.
           std::string nonneg = freshTemp(fn);
           fn.body << "  " << nonneg << " = icmp sge i64 " << idxName << ", 0\n";
+          std::string safeLo = freshTemp(fn);
+          fn.body << "  " << safeLo << " = select i1 " << nonneg << ", i64 " << idxName << ", i64 0\n";
+          std::string inRange = freshTemp(fn);
+          fn.body << "  " << inRange << " = icmp slt i64 " << safeLo << ", " << (stripped->arrayLength * 2) << "\n";
           std::string safeIdx = freshTemp(fn);
-          fn.body << "  " << safeIdx << " = select i1 " << nonneg << ", i64 " << idxName << ", i64 0\n";
+          fn.body << "  " << safeIdx << " = select i1 " << inRange << ", i64 " << safeLo << ", i64 "
+            << (stripped->arrayLength * 2 - 1) << "\n";
           idxName = safeIdx;
         }
         std::string scaled = freshTemp(fn);
