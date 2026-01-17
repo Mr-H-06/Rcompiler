@@ -546,8 +546,17 @@ namespace IRGen {
       TypeLayout elemLayout = layoutOf(elemType);
       size_t elemSlots = std::max<size_t>(1, elemLayout.slots);
       auto index = toI64(fn, emitExpr(fn, idx->index_expr.get()));
+      std::string idxName = index.name;
+      if (stripped && stripped->kind == BaseType::Array && stripped->hasArrayLength && stripped->arrayLength > 0) {
+        // Prevent negative index from producing a wild pointer on lvalue address calc.
+        std::string nonneg = freshTemp(fn);
+        fn.body << "  " << nonneg << " = icmp sge i64 " << idxName << ", 0\n";
+        std::string safeIdx = freshTemp(fn);
+        fn.body << "  " << safeIdx << " = select i1 " << nonneg << ", i64 " << idxName << ", i64 0\n";
+        idxName = safeIdx;
+      }
       std::string scaled = freshTemp(fn);
-      fn.body << "  " << scaled << " = mul i64 " << index.name << ", " << elemSlots << "\n";
+      fn.body << "  " << scaled << " = mul i64 " << idxName << ", " << elemSlots << "\n";
       std::string elemPtr = freshTemp(fn);
       if (basePtr.arrayAlloca && basePtr.slots > 1) {
         fn.body << "  " << elemPtr << " = getelementptr [" << basePtr.slots << " x i64], ptr " << basePtr.name <<
@@ -1622,6 +1631,14 @@ namespace IRGen {
         auto elemLayout = layoutOf(elemType);
         size_t elemSlots = std::max<size_t>(1, elemLayout.slots);
         std::string idxName = index.name;
+        if (stripped && stripped->kind == BaseType::Array && stripped->hasArrayLength && stripped->arrayLength > 0) {
+          // Prevent negative index from producing a wild pointer on writes.
+          std::string nonneg = freshTemp(fn);
+          fn.body << "  " << nonneg << " = icmp sge i64 " << idxName << ", 0\n";
+          std::string safeIdx = freshTemp(fn);
+          fn.body << "  " << safeIdx << " = select i1 " << nonneg << ", i64 " << idxName << ", i64 0\n";
+          idxName = safeIdx;
+        }
         std::string scaled = freshTemp(fn);
         fn.body << "  " << scaled << " = mul i64 " << idxName << ", " << elemSlots << "\n";
         std::string elemPtr = basePtr.arrayAlloca ? freshTemp(fn) : freshTemp(fn);
