@@ -296,9 +296,6 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         if (argv[i]) filters.emplace_back(argv[i]);
     }
-    if (filters.empty()) {
-        filters = {"comprehensive1", "comprehensive19", "comprehensive26"};
-    }
 
     auto should_run = [&](const fs::path &p) {
         if (filters.empty()) return true;

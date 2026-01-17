@@ -374,6 +374,11 @@ namespace IRGen {
         fn.body << "  " << varName << " = call ptr @malloc(i64 " << (slots * 8) << ")\n";
         return {varName, "ptr", false, slots};
       }
+      if (slots >= kHeapSlotsThreshold) {
+        g_needsMalloc = true;
+        fn.body << "  " << varName << " = call ptr @malloc(i64 " << (slots * 8) << ")\n";
+        return {varName, "ptr", false, slots};
+      }
       fn.body << "  " << varName << " = alloca [" << slots << " x i64]\n";
       return {varName, "ptr", true, slots};
     } else {
@@ -607,8 +612,8 @@ namespace IRGen {
       return val;
     }
     std::string tmpAlloc = freshTemp(fn);
-    fn.body << "  " << tmpAlloc << " = alloca [" << std::max<size_t>(1, layout.slots) << " x i64]\n";
-    Value dst{tmpAlloc, "ptr", true, std::max<size_t>(1, layout.slots)};
+      size_t neededSlots = std::max<size_t>(1, layout.slots);
+      Value dst = allocSlotBuffer(fn, neededSlots);
     copySlots(fn, val, dst, std::max<size_t>(1, layout.slots));
     return dst;
   }
@@ -844,8 +849,7 @@ namespace IRGen {
         bool aggRet = retLayout.aggregate || retLayout.slots > 1;
         Value retDest;
         if (aggRet) {
-          retDest = {freshTemp(fn), "ptr", true, retLayout.slots};
-          fn.body << "  " << retDest.name << " = alloca [" << retLayout.slots << " x i64]\n";
+          retDest = allocSlotBuffer(fn, retLayout.slots);
         }
         std::vector<Value> args;
         TypeLayout recvLayout = layoutOf(objType);
@@ -855,13 +859,10 @@ namespace IRGen {
                        : emitExpr(fn, call->object_expr.get());
         if (!recvByRef && (recvLayout.aggregate || recvLayout.slots > 1)) {
           size_t copySlotsCount = std::max<size_t>(recvLayout.slots, std::max<size_t>(1, recv.slots));
-          std::string tmpAlloc = freshTemp(fn);
-          fn.body << "  " << tmpAlloc << " = alloca [" << copySlotsCount << " x i64]\n";
-          Value tmp{tmpAlloc, "ptr", true, copySlotsCount};
+          Value tmp = allocSlotBuffer(fn, copySlotsCount);
           copySlots(fn, recv, tmp, copySlotsCount);
           recv = tmp;
           recv.type = "ptr";
-          recv.arrayAlloca = true;
           recv.slots = copySlotsCount;
         } else if (recvByRef) {
           recv.type = "ptr";
@@ -913,14 +914,12 @@ namespace IRGen {
                   v.slots = std::max<size_t>(copySlotsCount, std::max<size_t>(v.slots, argSlots));
                   return;
                 }
-                std::string tmpAlloc = freshTemp(fn);
-                fn.body << "  " << tmpAlloc << " = alloca [" << copySlotsCount << " x i64]\n";
-                Value dst{tmpAlloc, "ptr", true, copySlotsCount};
+                Value dst = allocSlotBuffer(fn, copySlotsCount);
                 copySlots(fn, v, dst, copySlotsCount);
                 v = dst;
                 v.type = "ptr";
                 v.slots = copySlotsCount;
-                v.arrayAlloca = true;
+                v.arrayAlloca = dst.arrayAlloca;
               };
               forceCopy(argV);
             }
@@ -962,8 +961,7 @@ namespace IRGen {
       bool aggRet = retLayout.aggregate || retLayout.slots > 1;
       Value retDest;
       if (aggRet) {
-        retDest = {freshTemp(fn), "ptr", true, retLayout.slots};
-        fn.body << "  " << retDest.name << " = alloca [" << retLayout.slots << " x i64]\n";
+        retDest = allocSlotBuffer(fn, retLayout.slots);
       }
       for (size_t i = 0; i < call->args.size(); ++i) {
         TypeRef paramType = (info && i < info->params.size()) ? info->params[i] : nullptr;
@@ -1002,14 +1000,12 @@ namespace IRGen {
                 v.slots = std::max<size_t>(copySlotsCount, std::max<size_t>(v.slots, argSlots));
                 return;
               }
-              std::string tmpAlloc = freshTemp(fn);
-              fn.body << "  " << tmpAlloc << " = alloca [" << copySlotsCount << " x i64]\n";
-              Value dst{tmpAlloc, "ptr", true, copySlotsCount};
+              Value dst = allocSlotBuffer(fn, copySlotsCount);
               copySlots(fn, v, dst, copySlotsCount);
               v = dst;
               v.type = "ptr";
               v.slots = copySlotsCount;
-              v.arrayAlloca = true;
+              v.arrayAlloca = dst.arrayAlloca;
             };
             forceCopy(argV);
           }
@@ -1091,9 +1087,7 @@ namespace IRGen {
       TypeRef stType = exprType(expr);
       auto layout = layoutOf(stType);
       size_t totalSlots = layout.slots;
-      std::string allocaName = freshTemp(fn);
-      fn.body << "  " << allocaName << " = alloca [" << totalSlots << " x i64]\n";
-      Value dst{allocaName, "ptr", true, totalSlots};
+      Value dst = allocSlotBuffer(fn, totalSlots);
       auto structName = stType ? stripRef(stType)->name : structLit->name;
       auto &fields = getStructLayout(structName);
       for (auto &field: structLit->fields) {
@@ -1105,9 +1099,7 @@ namespace IRGen {
         Value val = emitExpr(fn, field.second.get());
         if (fldLayout.aggregate || fldLayout.slots > 1) {
           if (val.type != "ptr") {
-            std::string tmpAlloc = freshTemp(fn);
-            fn.body << "  " << tmpAlloc << " = alloca [" << slots << " x i64]\n";
-            Value tmp{tmpAlloc, "ptr", true, slots};
+            Value tmp = allocSlotBuffer(fn, slots);
             copySlots(fn, val, tmp, slots);
             val = tmp;
           }
@@ -1133,8 +1125,7 @@ namespace IRGen {
       bool aggRet = retLayout.aggregate || retLayout.slots > 1;
       Value retDest;
       if (aggRet) {
-        retDest = {freshTemp(fn), "ptr", true, retLayout.slots};
-        fn.body << "  " << retDest.name << " = alloca [" << retLayout.slots << " x i64]\n";
+        retDest = allocSlotBuffer(fn, retLayout.slots);
       }
       std::vector<Value> args;
       for (size_t i = 0; i < staticCall->args.size(); ++i) {
@@ -1166,14 +1157,12 @@ namespace IRGen {
               v.slots = std::max<size_t>(copySlotsCount, std::max<size_t>(v.slots, argSlots));
               return;
             }
-            std::string tmpAlloc = freshTemp(fn);
-            fn.body << "  " << tmpAlloc << " = alloca [" << copySlotsCount << " x i64]\n";
-            Value tmp{tmpAlloc, "ptr", true, copySlotsCount};
+            Value tmp = allocSlotBuffer(fn, copySlotsCount);
             copySlots(fn, v, tmp, copySlotsCount);
             v = tmp;
             v.type = "ptr";
             v.slots = copySlotsCount;
-            v.arrayAlloca = true;
+            v.arrayAlloca = tmp.arrayAlloca;
           };
           forceCopy(argV);
           (void) paramMutable;
@@ -1243,8 +1232,7 @@ namespace IRGen {
       TypeRef arrType = exprType(expr);
       TypeLayout arrLayout = layoutOf(arrType);
       size_t totalSlots = std::max<size_t>(1, arrLayout.slots);
-      Value dst{freshTemp(fn), "ptr", true, totalSlots};
-      fn.body << "  " << dst.name << " = alloca [" << totalSlots << " x i64]\n";
+      Value dst = allocSlotBuffer(fn, totalSlots);
       TypeRef stripped = stripRef(arrType);
       TypeRef elemType = (stripped && stripped->kind == BaseType::Array) ? stripped->elementType : nullptr;
       TypeLayout elemLayout = layoutOf(elemType);
@@ -1262,9 +1250,7 @@ namespace IRGen {
         }
         if (elemLayout.aggregate || elemLayout.slots > 1) {
           if (val.type != "ptr") {
-            std::string tmpAlloc = freshTemp(fn);
-            fn.body << "  " << tmpAlloc << " = alloca [" << elemSlots << " x i64]\n";
-            Value tmp{tmpAlloc, "ptr", true, elemSlots};
+            Value tmp = allocSlotBuffer(fn, elemSlots);
             copySlots(fn, val, tmp, elemSlots);
             val = tmp;
           }
@@ -1293,9 +1279,7 @@ namespace IRGen {
           Value val = emitExpr(fn, arr->elements[i].get());
           if (elemLayout.aggregate || elemLayout.slots > 1) {
             if (val.type != "ptr") {
-              std::string tmpAlloc = freshTemp(fn);
-              fn.body << "  " << tmpAlloc << " = alloca [" << elemSlots << " x i64]\n";
-              Value tmp{tmpAlloc, "ptr", true, elemSlots};
+              Value tmp = allocSlotBuffer(fn, elemSlots);
               copySlots(fn, val, tmp, elemSlots);
               val = tmp;
             }
@@ -1321,16 +1305,13 @@ namespace IRGen {
       bool aggResult = resLayout.aggregate || resLayout.slots > 1;
       Value aggDest;
       if (aggResult) {
-        aggDest = {freshTemp(fn), "ptr", true, std::max<size_t>(1, resLayout.slots)};
-        fn.body << "  " << aggDest.name << " = alloca [" << aggDest.slots << " x i64]\n";
+        aggDest = allocSlotBuffer(fn, std::max<size_t>(1, resLayout.slots));
       }
       auto copyToAgg = [&](const Value &src) {
-        Value dst{aggDest.name, "ptr", true, aggDest.slots};
+        Value dst{aggDest.name, "ptr", aggDest.arrayAlloca, aggDest.slots};
         Value val = src;
         if (val.type != "ptr") {
-          std::string tmpAlloc = freshTemp(fn);
-          fn.body << "  " << tmpAlloc << " = alloca [" << aggDest.slots << " x i64]\n";
-          Value tmp{tmpAlloc, "ptr", true, aggDest.slots};
+          Value tmp = allocSlotBuffer(fn, aggDest.slots);
           copySlots(fn, val, tmp, aggDest.slots);
           val = tmp;
         }
@@ -1791,9 +1772,7 @@ namespace IRGen {
       if (fn.aggregateReturn) {
         Value rhs = emitExpr(fn, ret->value.get());
         if (rhs.type != "ptr") {
-          std::string tmpAlloc = freshTemp(fn);
-          fn.body << "  " << tmpAlloc << " = alloca [" << fn.retLayout.slots << " x i64]\n";
-          Value tmp{tmpAlloc, "ptr", true, fn.retLayout.slots};
+          Value tmp = allocSlotBuffer(fn, fn.retLayout.slots);
           copySlots(fn, rhs, tmp, fn.retLayout.slots);
           rhs = tmp;
         }
