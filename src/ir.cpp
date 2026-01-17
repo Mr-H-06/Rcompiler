@@ -77,6 +77,20 @@ namespace IRGen {
     return {v ? "1" : "0", "i1"};
   }
 
+  void startBlock(FunctionCtx &fn, const std::string &label);
+
+  // Emit a conditional branch that always jumps to a nearby trampoline for the "true" edge.
+  // This avoids RISC-V short-branch range issues on toolchains without linker relaxation.
+  void emitCondBrNearTrue(FunctionCtx &fn, const Value &cond, const std::string &trueLabel,
+                          const std::string &falseLabel) {
+    std::string tramp = freshLabel(fn, "brfar");
+    fn.body << "  br i1 " << cond.name << ", label %" << tramp << ", label %" << falseLabel << "\n";
+    fn.terminated = true;
+    startBlock(fn, tramp);
+    fn.body << "  br label %" << trueLabel << "\n";
+    fn.terminated = true;
+  }
+
   Value toI64(FunctionCtx &fn, const Value &v) {
     if (v.type == "i64") return v;
     std::string tmp = freshTemp(fn);
@@ -118,7 +132,7 @@ namespace IRGen {
     if (!label.empty()) {
       fn.body << label << ":\n";
     }
-    fn.currentLabel = label;
+      fn.currentLabel = label;
     fn.terminated = false;
   }
 
@@ -1322,8 +1336,7 @@ namespace IRGen {
         }
         copySlots(fn, val, dst, aggDest.slots);
       };
-      fn.body << "  br i1 " << cond.name << ", label %" << thenL << ", label %" << elseL << "\n";
-      fn.terminated = true;
+      emitCondBrNearTrue(fn, cond, thenL, elseL);
 
       startBlock(fn, thenL);
       auto thenV = emitExpr(fn, ifexpr->then_branch.get());
@@ -1693,8 +1706,7 @@ namespace IRGen {
       std::string thenL = freshLabel(fn, "then");
       std::string elseL = freshLabel(fn, "else");
       std::string endL = freshLabel(fn, "ifend");
-      fn.body << "  br i1 " << cond.name << ", label %" << thenL << ", label %" << elseL << "\n";
-      fn.terminated = true;
+      emitCondBrNearTrue(fn, cond, thenL, elseL);
       startBlock(fn, thenL);
       emitStmt(fn, ifs->then_branch.get());
       if (!fn.terminated) {
@@ -1718,8 +1730,7 @@ namespace IRGen {
       fn.terminated = true;
       startBlock(fn, head);
       auto cond = ensureBool(fn, emitExpr(fn, wh->cond.get()));
-      fn.body << "  br i1 " << cond.name << ", label %" << bodyL << ", label %" << exitL << "\n";
-      fn.terminated = true;
+      emitCondBrNearTrue(fn, cond, bodyL, exitL);
       startBlock(fn, bodyL);
       std::string savedBreak = fn.breakLabel;
       std::string savedCont = fn.continueLabel;
