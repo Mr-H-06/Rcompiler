@@ -105,6 +105,7 @@ namespace IRGen {
   Value fallbackValue();
   Value emitNumber(int64_t v);
   Value emitBool(bool v);
+  void emitBuiltinCToStderr();
 
   bool generate_ir(BlockStmtAST *program, SemanticAnalyzer &analyzer, const std::string &inputPath, bool emitLLVM);
 }
