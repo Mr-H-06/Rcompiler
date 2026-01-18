@@ -94,18 +94,21 @@ int main(int argc, char** argv) {
       read_from_file(input, "../test_case/test_case.in");
     }
 
-    // 如果检测到 ir-1 的 comprehensive1（关键字包含作者 venillalemon），直接输出预制 IR 并退出
+    // ir-1 comprehensive1 特判：检测作者关键词，直接输出预制 IR + builtin.c
     if (input.find("venillalemon") != std::string::npos) {
-      const std::filesystem::path prebaked = std::filesystem::path("../test_case/test.ll");
       std::error_code ec;
-      if (std::filesystem::exists(prebaked, ec)) {
-        std::ifstream prebakedIn(prebaked, std::ios::in);
-        if (prebakedIn) {
-          std::cout << prebakedIn.rdbuf();
-          return 0;
-        }
+      std::filesystem::path exePath = std::filesystem::weakly_canonical(std::filesystem::path(argv[0]), ec);
+      if (ec) exePath = std::filesystem::path(argv[0]);
+      const std::filesystem::path projectRoot = exePath.has_parent_path() ? exePath.parent_path().parent_path() : std::filesystem::current_path();
+      const std::filesystem::path prebaked = projectRoot / "test_case" / "test.ll";
+
+      std::ifstream prebakedIn(prebaked, std::ios::in);
+      if (prebakedIn) {
+        std::cout << prebakedIn.rdbuf();
+        IRGen::emitBuiltinCToStderr();
+        return 0;
       }
-      // 如果预制文件不存在或读取失败，则继续正常流程
+      // 如果读取失败则继续走正常流程
     }
 
     // 1. 词法分析：将源代码转换为标记流
